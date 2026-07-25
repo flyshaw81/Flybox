@@ -1,0 +1,39 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window (127.0.0.1 local UI)",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://127.0.0.1:*/*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "core:window:allow-start-dragging",
+    "allow-list-images",
+    "allow-delete-image",
+    "allow-get-thumbnail",
+    "allow-vault-status",
+    "allow-vault-setup",
+    "allow-vault-unlock",
+    "allow-vault-lock",
+    "allow-vault-list",
+    "allow-vault-upsert",
+    "allow-vault-delete",
+    "allow-vault-clear-destroyed",
+    "opener:default",
+    "dialog:default",
+    "clipboard-manager:default",
+    "store:default",
+    "fs:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [{ "path": "**" }]
+    }
+  ]
+}

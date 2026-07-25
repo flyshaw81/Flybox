@@ -1,0 +1,1116 @@
+/* Pencil: 极深黑顶栏 · 无胶囊 · 无线框 · 右上 ─□✕ · 网格/瀑布/单张 */
+
+:root {
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --bg-elev: #121212;
+  --text: #f2f2f2;
+  --muted: #5c5c5c;
+  --soft: #b0b0b0;
+  --danger: #e07070;
+  --topbar-h: 40px;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 输入框仍可编辑、可划选（方便改密码/密钥） */
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  outline: none;
+  cursor: pointer;
+}
+
+button:focus-visible {
+  outline: 1px solid #444;
+  outline-offset: 2px;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
+
+/* —— 唯一顶栏 —— */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: var(--topbar-h);
+  padding: 0 0 0 16px;
+  background: #000;
+  border: 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+}
+
+.brand-back {
+  flex-shrink: 0;
+  height: 100%;
+  min-height: var(--topbar-h);
+  color: #b0b0b0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.brand-back:hover {
+  color: #fff;
+}
+
+.logo {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  color: #f2f2f2;
+}
+
+.vault-path,
+.viewer-title {
+  color: #5c5c5c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 36vw;
+  font-size: 13px;
+}
+
+.viewer-title {
+  color: #8a8a8a;
+}
+
+.count-label {
+  color: #555;
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  padding-right: 8px;
+  height: 100%;
+}
+
+/* Icon buttons — no capsule, no border (Pencil design) */
+.icon-btn {
+  width: 36px;
+  height: 100%;
+  min-height: 36px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #b0b0b0;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.icon-btn svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.icon-btn.empty-pick {
+  width: auto;
+  padding: 0 8px;
+}
+
+.icon-btn:hover {
+  color: #fff;
+  background: transparent;
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.icon-btn.on {
+  color: #fff;
+}
+
+.icon-btn.danger {
+  color: #e07070;
+}
+
+.icon-btn.danger:hover {
+  color: #ff9a9a;
+}
+
+.icon-btn.zoom-pct {
+  width: auto;
+  min-width: 40px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: #b0b0b0;
+}
+
+.icon-btn-label {
+  font-size: 13px;
+  color: inherit;
+}
+
+/* legacy text btn if any remains */
+.tbtn {
+  border: 0;
+  background: transparent;
+  color: #b0b0b0;
+  padding: 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.win-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  flex-shrink: 0;
+}
+
+.win-btn {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #b0b0b0;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.win-btn:hover {
+  background: #1a1a1a;
+  color: #fff;
+}
+
+.win-btn.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 20px 28px;
+  background: var(--bg);
+  /* Custom scrollbar: black track, dark-gray thumb */
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a #000000;
+}
+
+.content::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.content::-webkit-scrollbar-track {
+  background: #000;
+}
+
+.content::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border: 0;
+  border-radius: 0;
+}
+
+.content::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
+
+.content::-webkit-scrollbar-corner {
+  background: #000;
+}
+
+/* Lightbox open: keep gallery in DOM (preserve scroll) but hide visually */
+.content-hold {
+  visibility: hidden;
+  pointer-events: none;
+  position: absolute;
+  inset: var(--topbar-h) 0 0 0;
+  height: auto;
+  max-height: calc(100% - var(--topbar-h));
+}
+
+.status {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #555;
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  padding: 40px 20px;
+  background: var(--bg);
+}
+
+.empty h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #f2f2f2;
+}
+
+.empty p {
+  margin: 0;
+  color: #5c5c5c;
+  max-width: 400px;
+  font-size: 14px;
+}
+
+.empty.compact {
+  padding-top: 80px;
+}
+
+/* —— 网格：等大方格 cover —— */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 10px;
+}
+
+.tile {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: #121212;
+  cursor: zoom-in;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.tile-grid {
+  aspect-ratio: 1;
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: 168px 168px;
+}
+
+.tile-grid img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tile-grid .tile-ph {
+  position: absolute;
+  inset: 0;
+}
+
+/* —— 瀑布：JS 最短列排布（对照 masonic/Pinterest）—— */
+.waterfall-js {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+}
+
+.waterfall-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* Aspect-ratio reserved BEFORE image loads → no scroll jump */
+.tile-wf {
+  width: 100%;
+  aspect-ratio: var(--ar, 0.75);
+  position: relative;
+  height: auto;
+}
+
+.tile-wf img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tile-wf .tile-ph {
+  position: absolute;
+  inset: 0;
+}
+
+.tile img {
+  display: block;
+  background: #121212;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tile img.on {
+  opacity: 1;
+}
+
+.tile-ph {
+  display: grid;
+  place-items: center;
+  background: #141414;
+  color: #444;
+  font-size: 12px;
+  padding: 10px;
+  text-align: center;
+}
+
+.tile-ph.fail {
+  background: #121212;
+  color: #555;
+}
+
+.tile:hover img.on {
+  filter: brightness(1.06);
+}
+
+.banner {
+  padding: 8px 20px;
+  font-size: 13px;
+  background: #1a1010;
+  color: #e8a0a0;
+  border: 0;
+}
+
+/* —— 大图 —— */
+.viewer {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+
+.viewer.overlay {
+  position: fixed;
+  top: var(--topbar-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  background: #000;
+}
+
+.viewer.page {
+  position: relative;
+  background: #000;
+  flex: 1;
+  min-height: 0;
+}
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  user-select: none;
+  background: #000;
+  cursor: default;
+  touch-action: none;
+}
+
+.stage-zoomed {
+  cursor: grab;
+}
+
+.stage-zoomed:active {
+  cursor: grabbing;
+}
+
+.stage-inner {
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  /* Must receive pointer events so zoomed image can be dragged */
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.stage-inner img {
+  max-width: min(96vw, 1400px);
+  max-height: calc(100vh - var(--topbar-h) - 32px);
+  object-fit: contain;
+  transform-origin: center center;
+  transition: none;
+  box-shadow: none;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 48px;
+  height: 64px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #666;
+  font-size: 36px;
+  font-weight: 300;
+  cursor: pointer;
+}
+
+.nav:hover {
+  background: transparent;
+  color: #fff;
+}
+
+.nav.prev {
+  left: 12px;
+}
+
+.nav.next {
+  right: 12px;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  background: #111;
+  border: 0;
+  color: #ddd;
+  padding: 10px 16px;
+  border-radius: 0;
+  z-index: 100;
+}
+
+/* —— 密码箱 —— */
+.passbox-center {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 40px 24px;
+  background: var(--bg);
+}
+
+.passbox-h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #f2f2f2;
+}
+
+.passbox-h1.danger {
+  color: #e07070;
+}
+
+.passbox-sub {
+  margin: 0;
+  font-size: 12px;
+  color: #555;
+  text-align: center;
+  max-width: 420px;
+}
+
+.passbox-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(420px, 100%);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.field > span {
+  font-size: 12px;
+  color: #666;
+}
+
+.field input,
+.field textarea {
+  width: 100%;
+  border: 0;
+  outline: none;
+  background: #121212;
+  color: #e0e0e0;
+  font: inherit;
+  font-size: 13px;
+  padding: 0 12px;
+  height: 40px;
+  border-radius: 0;
+}
+
+.field textarea {
+  height: auto;
+  min-height: 120px;
+  padding: 10px 12px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.field input::placeholder,
+.field textarea::placeholder {
+  color: #444;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  background: #121212;
+  height: 40px;
+  width: 100%;
+}
+
+.field-row input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: transparent;
+}
+
+.field-row .icon-btn {
+  width: 36px;
+  height: 100%;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.passbox-primary {
+  width: min(420px, 100%);
+  height: 40px;
+  border: 0;
+  background: #1a1a1a;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.passbox-primary:hover {
+  background: #222;
+  color: #fff;
+}
+
+.passbox-warn {
+  margin: 0;
+  font-size: 11px;
+  color: #6b4040;
+  text-align: center;
+  max-width: 420px;
+  line-height: 1.5;
+}
+
+.passbox-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #555;
+}
+
+.passbox-unlock {
+  gap: 16px;
+}
+
+.passbox-unlock-form {
+  gap: 10px;
+}
+
+.passbox-forgot-row {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.passbox-forgot {
+  border: 0;
+  background: transparent;
+  color: #555;
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.passbox-forgot:hover {
+  color: #aaa;
+}
+
+.passbox-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 12px;
+  background: #121212;
+}
+
+.passbox-hint-note {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #3a3a3a;
+}
+
+.passbox-unlock-form .passbox-warn {
+  margin-top: 2px;
+  text-align: left;
+  max-width: none;
+  width: 100%;
+}
+
+.passbox-link {
+  border: 0;
+  background: transparent;
+  color: #5c5c5c;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.passbox-link:hover {
+  color: #aaa;
+}
+
+.passbox-list {
+  padding: 16px 24px 24px;
+}
+
+.passbox-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin-bottom: 16px;
+  row-gap: 10px;
+}
+
+.passbox-tab {
+  border: 0;
+  background: transparent;
+  color: #5c5c5c;
+  font-size: 13px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.passbox-tab.on {
+  color: #fff;
+  font-weight: 500;
+}
+
+.passbox-tab:hover {
+  color: #ccc;
+}
+
+.passbox-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.passbox-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.passbox-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+  height: 100%;
+}
+
+.passbox-row-ico {
+  color: #888;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.passbox-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.passbox-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #e8e8e8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.passbox-row-meta {
+  font-size: 11px;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.passbox-copy {
+  width: 36px;
+  color: #555 !important;
+  flex-shrink: 0;
+}
+
+/* 网格：固定每排 4 个 */
+.passbox-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .passbox-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.passbox-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 140px;
+  padding: 16px;
+  background: #121212;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.passbox-card:hover {
+  background: #161616;
+}
+
+.passbox-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.passbox-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #e8e8e8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.passbox-card-copy {
+  color: #555;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.passbox-card-type {
+  font-size: 11px;
+  color: #666;
+}
+
+.passbox-card-preview,
+.passbox-card-lines {
+  font-size: 12px;
+  color: #888;
+  line-height: 1.4;
+}
+
+.passbox-card-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.passbox-card-lines span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.passbox-edit {
+  padding: 28px 48px 40px;
+}
+
+.passbox-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: min(480px, 100%);
+}
+
+.passbox-edit-form .passbox-primary {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.passbox-note-foot {
+  margin: 0;
+  font-size: 11px;
+  color: #444;
+}
+
+.passbox-add-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  border: 0;
+  background: transparent;
+  color: #888;
+  font-size: 13px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.passbox-add-key:hover {
+  color: #e0e0e0;
+}
+
+.passbox-images-field > span {
+  font-size: 12px;
+  color: #666;
+}
+
+.passbox-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+}
+
+.passbox-img-item {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  background: #121212;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.passbox-img-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+
+.passbox-img-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.65);
+  color: #ddd;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.passbox-img-remove:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.passbox-img-add {
+  width: 88px;
+  height: 88px;
+  border: 0;
+  background: #121212;
+  color: #666;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.passbox-img-add:hover {
+  color: #ccc;
+  background: #161616;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+/* —— 桌面右键菜单 —— */
+.ctx-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 168px;
+  padding: 4px 0;
+  background: #161616;
+  border: 1px solid #2a2a2a;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  color: #e8e8e8;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  color: #e0e0e0;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.ctx-item:hover:not(:disabled) {
+  background: #252525;
+  color: #fff;
+}
+
+.ctx-item:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.ctx-item.danger {
+  color: #e07070;
+}
+
+.ctx-item.danger:hover:not(:disabled) {
+  background: #2a1515;
+  color: #ff9a9a;
+}
+
+.ctx-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: #2a2a2a;
+}

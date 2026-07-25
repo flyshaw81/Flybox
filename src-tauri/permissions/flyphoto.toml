@@ -1,0 +1,54 @@
+[[permission]]
+identifier = "allow-list-images"
+description = "Allow scanning the vault folder for images"
+commands.allow = ["list_images"]
+
+[[permission]]
+identifier = "allow-delete-image"
+description = "Allow deleting an image file from disk"
+commands.allow = ["delete_image"]
+
+[[permission]]
+identifier = "allow-get-thumbnail"
+description = "Allow generating image thumbnails"
+commands.allow = ["get_thumbnail"]
+
+[[permission]]
+identifier = "allow-vault-status"
+description = "Allow reading password vault status"
+commands.allow = ["vault_status"]
+
+[[permission]]
+identifier = "allow-vault-setup"
+description = "Allow creating the password vault"
+commands.allow = ["vault_setup"]
+
+[[permission]]
+identifier = "allow-vault-unlock"
+description = "Allow unlocking the password vault"
+commands.allow = ["vault_unlock"]
+
+[[permission]]
+identifier = "allow-vault-lock"
+description = "Allow locking the password vault"
+commands.allow = ["vault_lock"]
+
+[[permission]]
+identifier = "allow-vault-list"
+description = "Allow listing vault entries when unlocked"
+commands.allow = ["vault_list"]
+
+[[permission]]
+identifier = "allow-vault-upsert"
+description = "Allow creating or updating vault entries"
+commands.allow = ["vault_upsert"]
+
+[[permission]]
+identifier = "allow-vault-delete"
+description = "Allow deleting vault entries"
+commands.allow = ["vault_delete"]
+
+[[permission]]
+identifier = "allow-vault-clear-destroyed"
+description = "Allow clearing destroyed flag to create a new vault"
+commands.allow = ["vault_clear_destroyed"]
