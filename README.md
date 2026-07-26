@@ -1,4 +1,4 @@
-# Flyphoto
+# FLYBOX
 
 极简本地图库：像 Obsidian 打开 vault 一样，指定一个文件夹即可浏览图片。
 

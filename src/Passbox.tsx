@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -11,25 +10,27 @@ import {
   CreditCard,
   FileText,
   Gamepad2,
-  Image as ImageIcon,
   ImagePlus,
   Key,
   LayoutGrid,
   List,
   Lock,
-  Minus,
   Plus,
   Skull,
-  Square,
   Trash2,
   User,
   X,
 } from "lucide-react";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
+import { useI18n } from "./i18n";
 
-const appWindow = getCurrentWindow();
+type ModuleChrome = {
+  title?: string;
+  meta?: string;
+  tools?: ReactNode;
+};
+
 const ICO = 16;
-const ICO_WIN = 14;
 
 /** 账号类：用户名 + 密码 */
 export type AccountLikeType = "account" | "game" | "douyin" | "x" | "google" | "apple";
@@ -147,13 +148,17 @@ function mimeFromPath(path: string): string {
   return "image/jpeg";
 }
 
-function bytesToDataUrl(bytes: Uint8Array, mime: string): string {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return `data:${mime};base64,${btoa(binary)}`;
+/** 大图安全转 data URL，避免 fromCharCode 展开爆栈 */
+function bytesToDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const blob = new Blob([copy.buffer], { type: mime || "image/jpeg" });
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
 }
 
 function fieldStr(fields: Record<string, unknown> | undefined, key: string): string {
@@ -251,22 +256,6 @@ function TypeIcon({ type }: { type: EntryType }) {
   return <User {...p} />;
 }
 
-function WinControls() {
-  return (
-    <div className="win-controls">
-      <button type="button" className="win-btn" title="最小化" onClick={() => void appWindow.minimize()}>
-        <Minus size={ICO_WIN} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
-      <button type="button" className="win-btn" title="最大化" onClick={() => void appWindow.toggleMaximize()}>
-        <Square size={12} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
-      <button type="button" className="win-btn close" title="关闭" onClick={() => void appWindow.close()}>
-        <X size={ICO_WIN} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
-    </div>
-  );
-}
-
 function emptyDraft(type: EntryType = "api"): VaultEntry {
   return {
     id: "",
@@ -315,7 +304,40 @@ function draftFromSlice(
   };
 }
 
-export default function Passbox({ onBackToGallery }: { onBackToGallery: () => void }) {
+export default function Passbox({
+  onBackToGallery,
+  embedded = false,
+  onChromeChange,
+}: {
+  onBackToGallery: () => void;
+  /** 由 App 统一顶栏时，隐藏窗控/模块外的第二套全屏壳 */
+  embedded?: boolean;
+  /** 嵌入时把场景标题与工具上报到 App 唯一顶栏 */
+  onChromeChange?: (chrome: ModuleChrome | null) => void;
+}) {
+  const { t, locale } = useI18n();
+  const labels = useMemo(() => {
+    const m = { ...TYPE_LABEL };
+    (Object.keys(TYPE_LABEL) as EntryType[]).forEach((k) => {
+      m[k] = t(
+        (
+          {
+            api: "type_api",
+            bank: "type_bank",
+            account: "type_account",
+            game: "type_game",
+            douyin: "type_douyin",
+            x: "type_x",
+            google: "type_google",
+            apple: "type_apple",
+            note: "type_note",
+          } as Record<EntryType, string>
+        )[k],
+      );
+    });
+    return m;
+  }, [t, locale]);
+
   const [screen, setScreen] = useState<Screen>("boot");
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [entries, setEntries] = useState<VaultEntry[]>([]);
@@ -337,8 +359,14 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
 
   // list
   const [tab, setTab] = useState<TabFilter>("all");
+  /** 顶栏 tools 闭包易过期：新建永远读最新分类 */
+  const tabRef = useRef<TabFilter>("all");
   const [boxView, setBoxView] = useState<BoxView>("list");
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
+
+  useEffect(() => {
+    tabRef.current = tab;
+  }, [tab]);
 
   // edit
   const [draft, setDraft] = useState<VaultEntry>(emptyDraft());
@@ -493,15 +521,16 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
     await refreshStatus();
   };
 
-  const openNew = () => {
+  const openNew = useCallback(() => {
     // 当前筛选了哪个分类，新建就落在哪个分类；「全部」时默认 API 密钥
-    const type: EntryType = tab === "all" ? "api" : tab;
+    const cur = tabRef.current;
+    const type: EntryType = cur === "all" ? "api" : cur;
     typeCacheRef.current = {};
     setFormGen((g) => g + 1);
     setDraft(emptyDraft(type));
     setError(null);
     setScreen("edit");
-  };
+  }, []);
 
   const applyOpenedEntry = (n: VaultEntry) => {
     typeCacheRef.current = {
@@ -651,7 +680,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
           showToast(`图片过大已跳过（单张不超过约 2.5MB）`);
           continue;
         }
-        added.push(bytesToDataUrl(bytes, mimeFromPath(path)));
+        added.push(await bytesToDataUrl(bytes, mimeFromPath(path)));
       }
       if (added.length === 0) return;
       setDraft((d) => ({
@@ -734,121 +763,124 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
     setStatus({ state: "none", hint1: "", hint2: "", failCount: 0, entryCount: 0 });
   };
 
-  const titleText =
+  /** 嵌入顶栏：锁图标已标「密码箱」，这里只补场景，避免「密码箱·列表」叠字 */
+  const chromeTitle =
     screen === "setup"
-      ? "密码箱 · 首次设置"
+      ? t("createPassbox")
       : screen === "edit"
-        ? "编辑条目"
-        : screen === "list"
-          ? boxView === "grid"
-            ? "密码箱 · 网格"
-            : "密码箱 · 列表"
-          : "密码箱";
+        ? draft.id
+          ? t("editEntry")
+          : t("newEntry")
+        : screen === "unlock"
+          ? t("unlock")
+          : screen === "destroyed"
+            ? t("destroyed")
+            : screen === "list"
+              ? boxView === "grid"
+                ? t("grid")
+                : locale === "en"
+                  ? "List"
+                  : "列表"
+              : undefined;
+
+  const chromeMeta =
+    screen === "list" ? `${entries.length} ${t("notesCount")}` : undefined;
+
+  const tools: ReactNode = (
+    <>
+      {screen === "list" && (
+        <>
+          <button type="button" className="icon-btn" title={t("newEntry")} onClick={openNew}>
+            <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+          </button>
+          <button type="button" className="icon-btn" title={t("lockNow")} onClick={() => void onLock()}>
+            <Lock size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+          </button>
+          <button
+            type="button"
+            className={boxView === "list" ? "icon-btn on" : "icon-btn"}
+            title={t("listView")}
+            onClick={() => setBoxView("list")}
+          >
+            <List size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+          </button>
+          <button
+            type="button"
+            className={boxView === "grid" ? "icon-btn on" : "icon-btn"}
+            title={t("gridView")}
+            onClick={() => setBoxView("grid")}
+          >
+            <LayoutGrid size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+          </button>
+        </>
+      )}
+      {screen === "edit" && (
+        <>
+          <button
+            type="button"
+            className="icon-btn"
+            title={t("backList")}
+            onClick={() => {
+              setError(null);
+              setScreen("list");
+            }}
+          >
+            <ArrowLeft size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+          </button>
+          {draft.id ? (
+            <button
+              type="button"
+              className="icon-btn danger"
+              title={t("delete")}
+              onClick={() => void onDeleteEntry()}
+            >
+              <Trash2 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+          ) : null}
+        </>
+      )}
+    </>
+  );
+
+  // 嵌入：场景 + 工具并入 App 唯一顶栏（无第二层黑条）
+  useEffect(() => {
+    if (!embedded || !onChromeChange) return;
+    if (screen === "boot") {
+      onChromeChange(null);
+      return;
+    }
+    onChromeChange({
+      title: chromeTitle,
+      meta: chromeMeta,
+      tools,
+    });
+    // tools 随 screen / boxView / draft / tab 变
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [embedded, onChromeChange, screen, boxView, tab, entries.length, draft.id, chromeTitle, chromeMeta, locale]);
+
+  useEffect(() => {
+    if (!embedded || !onChromeChange) return;
+    return () => onChromeChange(null);
+  }, [embedded, onChromeChange]);
 
   if (screen === "boot") {
     return (
-      <div className="app">
-        <header className="topbar" data-tauri-drag-region onDoubleClick={() => void appWindow.toggleMaximize()}>
-          <div className="brand" data-tauri-drag-region>
-            <span className="logo">密码箱</span>
-          </div>
-          <div className="topbar-right">
-            <WinControls />
-          </div>
-        </header>
+      <div className="passbox-embedded">
         <div className="empty">
-          <p className="muted">正在打开…</p>
+          <p className="muted">{t("booting")}</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="app">
-      <header className="topbar" data-tauri-drag-region onDoubleClick={() => void appWindow.toggleMaximize()}>
-        <div className="brand" data-tauri-drag-region>
-          {screen === "edit" ? (
-            <button
-              type="button"
-              className="icon-btn"
-              title="返回"
-              onClick={() => {
-                setError(null);
-                setScreen("list");
-              }}
-            >
-              <ArrowLeft size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-            </button>
-          ) : null}
-          <span className="logo" data-tauri-drag-region>
-            {titleText}
-          </span>
-          {screen === "list" && (
-            <span className="count-label" data-tauri-drag-region>
-              {entries.length} 条
-            </span>
-          )}
-        </div>
-        <div className="topbar-right">
-          <div className="actions">
-            {screen === "list" && (
-              <>
-                <button type="button" className="icon-btn" title="新建" onClick={openNew}>
-                  <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button type="button" className="icon-btn" title="立即上锁" onClick={() => void onLock()}>
-                  <Lock size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="返回图库"
-                  onClick={() => {
-                    void onLock();
-                    onBackToGallery();
-                  }}
-                >
-                  <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className={boxView === "list" ? "icon-btn on" : "icon-btn"}
-                  title="列表"
-                  onClick={() => setBoxView("list")}
-                >
-                  <List size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className={boxView === "grid" ? "icon-btn on" : "icon-btn"}
-                  title="网格"
-                  onClick={() => setBoxView("grid")}
-                >
-                  <LayoutGrid size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-              </>
-            )}
-            {screen === "edit" && draft.id && (
-              <button type="button" className="icon-btn danger" title="删除" onClick={() => void onDeleteEntry()}>
-                <Trash2 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-              </button>
-            )}
-            {(screen === "setup" || screen === "unlock") && (
-              <button type="button" className="icon-btn" title="返回图库" onClick={onBackToGallery}>
-                <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-              </button>
-            )}
-          </div>
-          <WinControls />
-        </div>
-      </header>
-
+    <div className="passbox-embedded">
       {error && screen !== "unlock" && <div className="banner error">{error}</div>}
 
       {screen === "setup" && (
         <main className="passbox-center">
-          <h1 className="passbox-h1">创建密码箱</h1>
-          <p className="passbox-sub">内容仅本机加密保存 · 无法找回 · 无法重置 · 请务必记住密码</p>
+          <h1 className="passbox-h1">{t("createPassbox")}</h1>
+          <p className="passbox-sub">{t("createHint")}</p>
           <div className="passbox-form">
             <label className="field">
               <span>主密码</span>
@@ -880,7 +912,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
           </div>
           <p className="passbox-warn">连续输错 50 次密码 → 箱内全部内容自动永久销毁</p>
           <button type="button" className="passbox-primary" onClick={() => void onSetup()}>
-            创建并锁定
+            {t("createAndLock")}
           </button>
         </main>
       )}
@@ -888,7 +920,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
       {screen === "unlock" && (
         <main className="passbox-center passbox-unlock">
           <Lock size={32} strokeWidth={1.5} color="#666" absoluteStrokeWidth />
-          <h1 className="passbox-h1">输入密码解锁</h1>
+          <h1 className="passbox-h1">{t("unlockTitle")}</h1>
           <div className="passbox-form passbox-unlock-form">
             <label className="field">
               <span className="sr-only">密码</span>
@@ -905,7 +937,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
               />
             </label>
             <button type="button" className="passbox-primary" onClick={() => void onUnlock()}>
-              解锁
+              {t("unlock")}
             </button>
             {(status?.hint1 || status?.hint2) && (
               <div className="passbox-forgot-row">
@@ -914,15 +946,25 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
                   className="passbox-forgot"
                   onClick={() => setShowHints((v) => !v)}
                 >
-                  {showHints ? "收起提示" : "忘记密码"}
+                  {showHints ? t("hideHints") : t("forgotPw")}
                 </button>
               </div>
             )}
             {showHints && (
               <div className="passbox-hints">
-                {status?.hint1 ? <p className="passbox-hint">提示 1：{status.hint1}</p> : null}
-                {status?.hint2 ? <p className="passbox-hint">提示 2：{status.hint2}</p> : null}
-                <p className="passbox-hint-note">提示只能帮你想起来，不能重置密码</p>
+                {status?.hint1 ? (
+                  <p className="passbox-hint">
+                    {t("hintLabel1")}
+                    {status.hint1}
+                  </p>
+                ) : null}
+                {status?.hint2 ? (
+                  <p className="passbox-hint">
+                    {t("hintLabel2")}
+                    {status.hint2}
+                  </p>
+                ) : null}
+                <p className="passbox-hint-note">{t("hintOnly")}</p>
               </div>
             )}
             {error ? <p className="passbox-warn">{error}</p> : null}
@@ -933,13 +975,13 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
       {screen === "destroyed" && (
         <main className="passbox-center">
           <Skull size={40} strokeWidth={1.5} color="#6B4040" absoluteStrokeWidth />
-          <h1 className="passbox-h1 danger">密码箱已销毁</h1>
-          <p className="passbox-sub">连续 50 次密码错误 · 全部条目已永久删除且不可恢复</p>
+          <h1 className="passbox-h1 danger">{t("destroyed")}</h1>
+          <p className="passbox-sub">{t("destroyedSub")}</p>
           <button type="button" className="passbox-primary" onClick={() => void onDestroyedBack()}>
-            重新创建密码箱
+            {t("recreate")}
           </button>
           <button type="button" className="passbox-link" onClick={onBackToGallery}>
-            返回图库
+            {t("backGallery")}
           </button>
         </main>
       )}
@@ -958,7 +1000,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
               className={tab === "all" ? "passbox-tab on" : "passbox-tab"}
               onClick={() => setTab("all")}
             >
-              全部
+              {t("all")}
             </button>
             {ALL_TYPES.map((k) => (
               <button
@@ -967,15 +1009,15 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
                 className={tab === k ? "passbox-tab on" : "passbox-tab"}
                 onClick={() => setTab(k)}
               >
-                {TYPE_LABEL[k]}
+                {labels[k]}
               </button>
             ))}
           </div>
 
           {filtered.length === 0 && (
             <div className="empty compact">
-              <p>还没有条目</p>
-              <p className="muted">点右上角 + 添加 API 密钥、银行卡、账号或备忘</p>
+              <p>{t("noEntries")}</p>
+              <p className="muted">{t("noEntriesHint")}</p>
             </div>
           )}
 
@@ -993,7 +1035,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
                     </span>
                     <span className="passbox-row-text">
                       <span className="passbox-row-title">{e.title}</span>
-                      <span className="passbox-row-meta">{listMeta(e)}</span>
+                      <span className="passbox-row-meta">{listMeta(e).replace(TYPE_LABEL[e.type], labels[e.type])}</span>
                     </span>
                   </button>
                   <button
@@ -1040,7 +1082,7 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
                       <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
                     </span>
                   </div>
-                  <span className="passbox-card-type">{TYPE_LABEL[e.type]}</span>
+                  <span className="passbox-card-type">{labels[e.type]}</span>
                   {e.type === "api" ? (
                     <div className="passbox-card-lines">
                       <span>URL  {fieldStr(e.fields, "url") || "—"}</span>
@@ -1073,14 +1115,14 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
                 className={draft.type === k ? "passbox-tab on" : "passbox-tab"}
                 onClick={() => switchEditType(k)}
               >
-                {TYPE_LABEL[k]}
+                {labels[k]}
               </button>
             ))}
           </div>
 
           <div className="passbox-edit-form" key={`${formGen}-${draft.id || "new"}-${draft.type}`}>
             <label className="field">
-              <span>标题</span>
+              <span>{t("name")}</span>
               <div className="field-row">
                 <input
                   type="text"
@@ -1299,9 +1341,9 @@ export default function Passbox({ onBackToGallery }: { onBackToGallery: () => vo
               </div>
             </div>
 
-            <p className="passbox-note-foot">内容仅本地加密存储 · 离开密码箱后自动上锁</p>
+            <p className="passbox-note-foot">{t("localOnly")}</p>
             <button type="button" className="passbox-primary" onClick={() => void onSave()}>
-              保存
+              {t("save")}
             </button>
           </div>
         </main>

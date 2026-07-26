@@ -51,10 +51,21 @@ fn image_dimensions(path: &Path) -> (u32, u32) {
         .unwrap_or((1, 1))
 }
 
-fn collect_images(dir: &Path, out: &mut Vec<ImageEntry>, depth: u32) -> Result<(), String> {
-    if depth > 3 {
-        return Ok(());
-    }
+fn file_mtime_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// recursive=false：只扫当前文件夹；true：无限深扫所有子文件夹
+fn collect_images(
+    dir: &Path,
+    out: &mut Vec<(u64, ImageEntry)>,
+    recursive: bool,
+) -> Result<(), String> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => return Err(format!("无法读取目录：{e}")),
@@ -70,34 +81,37 @@ fn collect_images(dir: &Path, out: &mut Vec<ImageEntry>, depth: u32) -> Result<(
             continue;
         }
         if path.is_dir() {
-            let _ = collect_images(&path, out, depth + 1);
+            if recursive {
+                let _ = collect_images(&path, out, true);
+            }
         } else if path.is_file() && is_image(&path) {
             let (width, height) = image_dimensions(&path);
-            out.push(ImageEntry {
-                path: path.to_string_lossy().to_string(),
-                name,
-                width,
-                height,
-            });
+            let mtime = file_mtime_secs(&path);
+            out.push((
+                mtime,
+                ImageEntry {
+                    path: path.to_string_lossy().to_string(),
+                    name,
+                    width,
+                    height,
+                },
+            ));
         }
     }
     Ok(())
 }
 
 #[tauri::command]
-fn list_images(root: String) -> Result<Vec<ImageEntry>, String> {
+fn list_images(root: String, recursive: bool) -> Result<Vec<ImageEntry>, String> {
     let root = PathBuf::from(root.trim());
     if !root.is_dir() {
         return Err("图库路径不是有效文件夹".into());
     }
-    let mut images = Vec::new();
-    collect_images(&root, &mut images, 0)?;
-    images.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    let mut images: Vec<(u64, ImageEntry)> = Vec::new();
+    collect_images(&root, &mut images, recursive)?;
+    // 按修改时间从新到旧
+    images.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
+    let mut images: Vec<ImageEntry> = images.into_iter().map(|(_, e)| e).collect();
     if images.len() > 3000 {
         images.truncate(3000);
     }
@@ -401,7 +415,7 @@ pub fn run() {
             );
 
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("FLYPHOTO")
+                .title("FLYBOX")
                 .inner_size(1280.0, 840.0)
                 .min_inner_size(720.0, 480.0)
                 .center()

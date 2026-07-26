@@ -1,4 +1,11 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,8 +15,10 @@ import {
   Columns3,
   Copy,
   FolderOpen,
+  FolderSearch,
   Image as ImageIcon,
   LayoutGrid,
+  FileText,
   Lock,
   Minus,
   Plus,
@@ -20,7 +29,17 @@ import {
   X,
 } from "lucide-react";
 import Passbox from "./Passbox";
+import Notepad from "./Notepad";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
+import { LangButton, useI18n } from "./i18n";
+import { ThemeButton } from "./theme";
+
+/** 子模块上报到唯一顶栏的场景信息 + 右侧工具 */
+export type ModuleChrome = {
+  title?: string;
+  meta?: string;
+  tools?: ReactNode;
+};
 
 const appWindow = getCurrentWindow();
 const ICO = 16;
@@ -289,12 +308,13 @@ function WaterfallGallery({
 }
 
 function WinControls() {
+  const { t } = useI18n();
   return (
     <div className="win-controls">
       <button
         type="button"
         className="win-btn"
-        title="最小化"
+        title={t("minimize")}
         onClick={() => void appWindow.minimize()}
       >
         <Minus size={ICO_WIN} strokeWidth={1.75} absoluteStrokeWidth />
@@ -302,7 +322,7 @@ function WinControls() {
       <button
         type="button"
         className="win-btn"
-        title="最大化"
+        title={t("maximize")}
         onClick={() => void appWindow.toggleMaximize()}
       >
         <Square size={12} strokeWidth={1.75} absoluteStrokeWidth />
@@ -310,7 +330,7 @@ function WinControls() {
       <button
         type="button"
         className="win-btn close"
-        title="关闭"
+        title={t("close")}
         onClick={() => void appWindow.close()}
       >
         <X size={ICO_WIN} strokeWidth={1.75} absoluteStrokeWidth />
@@ -320,6 +340,7 @@ function WinControls() {
 }
 
 export default function App() {
+  const { t } = useI18n();
   const [vault, setVault] = useState<string | null>(null);
   const [images, setImages] = useState<ImageEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -339,27 +360,44 @@ export default function App() {
   } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [booting, setBooting] = useState(true);
+  /** 深扫子文件夹：默认关，只扫当前目录 */
+  const [deepScan, setDeepScan] = useState(false);
+  const deepScanRef = useRef(false);
   const bootRef = useRef(false);
   const loadGen = useRef(0);
   const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
   const bindContent = useCallback((node: HTMLElement | null) => {
     setScrollRoot(node);
   }, []);
-  /** 密码箱全屏页（与图库互斥） */
-  const [passboxOpen, setPassboxOpen] = useState(false);
+  /** 三大模块：图库 / 密码箱 / 记事本 */
+  type AppModule = "gallery" | "passbox" | "notepad";
+  const [appModule, setAppModule] = useState<AppModule>("gallery");
+  const [moduleChrome, setModuleChrome] = useState<ModuleChrome | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
+
+  const switchModule = useCallback((m: AppModule) => {
+    setActiveIndex(null);
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setModuleChrome(null);
+    setAppModule(m);
+  }, []);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(null), 1800);
   }, []);
 
-  const loadImages = useCallback(async (root: string) => {
+  const loadImages = useCallback(async (root: string, recursive?: boolean) => {
     const gen = ++loadGen.current;
+    const deep = recursive ?? deepScanRef.current;
     setLoading(true);
     setError(null);
     try {
-      const list = await invoke<ImageEntry[]>("list_images", { root });
+      const list = await invoke<ImageEntry[]>("list_images", {
+        root,
+        recursive: deep,
+      });
       if (gen !== loadGen.current) return;
       setImages(list);
     } catch (e) {
@@ -370,6 +408,15 @@ export default function App() {
       if (gen === loadGen.current) setLoading(false);
     }
   }, []);
+
+  const setDeepScanAndReload = useCallback(
+    (on: boolean) => {
+      deepScanRef.current = on;
+      setDeepScan(on);
+      if (vault) void loadImages(vault, on);
+    },
+    [vault, loadImages],
+  );
 
   const openVault = useCallback(
     async (path: string) => {
@@ -382,7 +429,7 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      await loadImages(path);
+      await loadImages(path, deepScanRef.current);
     },
     [loadImages],
   );
@@ -392,15 +439,15 @@ export default function App() {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "选择图库文件夹",
+        title: t("pickFolder"),
       });
       if (typeof selected === "string" && selected) {
         await openVault(selected);
       }
     } catch (e) {
-      showToast(`打开文件夹失败：${e}`);
+      showToast(`${t("openFolderFail")}：${e}`);
     }
-  }, [openVault, showToast]);
+  }, [openVault, showToast, t]);
 
   useEffect(() => {
     if (bootRef.current) return;
@@ -473,23 +520,25 @@ export default function App() {
       const type = blob.type || "image/png";
       if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
         await navigator.clipboard.write([new ClipboardItem({ [type]: blob })]);
-        showToast("已复制到剪贴板");
+        showToast(t("copiedClipboard"));
         return;
       }
       await writeText(entry.path);
-      showToast("已复制文件路径");
+      showToast(t("copiedPath"));
     } catch {
       try {
         await writeText(entry.path);
-        showToast("已复制文件路径");
+        showToast(t("copiedPath"));
       } catch (e) {
-        showToast(`复制失败：${e}`);
+        showToast(`${t("copyFail")}：${e}`);
       }
     }
   };
 
   const deleteImage = async (entry: ImageEntry, index: number) => {
-    const ok = window.confirm(`确定删除这张图片？\n\n${entry.name}\n\n将从磁盘彻底删除。`);
+    const ok = window.confirm(
+      `${t("deleteConfirm")}\n\n${entry.name}\n\n${t("deleteConfirmDisk")}`,
+    );
     if (!ok) return;
     try {
       await invoke("delete_image", { path: entry.path });
@@ -503,9 +552,9 @@ export default function App() {
         }
         return next;
       });
-      showToast("已删除");
+      showToast(t("deleted"));
     } catch (e) {
-      showToast(`删除失败：${e}`);
+      showToast(`${t("deleteFail")}：${e}`);
     }
   };
 
@@ -525,29 +574,29 @@ export default function App() {
       if (!opts?.lightbox) {
         items.push({
           id: "open",
-          label: "打开",
+          label: t("open"),
           onClick: () => openAt(index),
         });
       }
       items.push({
         id: "copy",
-        label: "复制图片",
+        label: t("copyImage"),
         onClick: () => void copyImage(entry),
       });
       items.push({
         id: "copy-path",
-        label: "复制路径",
+        label: t("copyPath"),
         onClick: () => {
           void writeText(entry.path).then(
-            () => showToast("已复制路径"),
-            (e) => showToast(`复制失败：${e}`),
+            () => showToast(t("copiedPath")),
+            (e) => showToast(`${t("copyFail")}：${e}`),
           );
         },
       });
       items.push({ id: "sep1", separator: true });
       items.push({
         id: "delete",
-        label: "删除",
+        label: t("delete"),
         danger: true,
         onClick: () => void deleteImage(entry, index),
       });
@@ -555,14 +604,14 @@ export default function App() {
         items.push({ id: "sep2", separator: true });
         items.push({
           id: "close",
-          label: "关闭预览",
+          label: t("closePreview"),
           onClick: () => closeLightbox(),
         });
       }
       return items;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showToast, closeLightbox],
+    [showToast, closeLightbox, t],
   );
 
   const onTileContext = useCallback(
@@ -581,30 +630,32 @@ export default function App() {
       const items: CtxItem[] = [
         {
           id: "pick",
-          label: vault ? "更换文件夹" : "选择图库文件夹",
+          label: vault ? t("changeFolder") : t("pickFolder"),
           onClick: () => void pickVault(),
         },
       ];
       if (vault) {
         items.push({
           id: "refresh",
-          label: "刷新",
+          label: t("refresh"),
           disabled: loading,
-          onClick: () => void loadImages(vault),
+          onClick: () => void loadImages(vault, deepScanRef.current),
         });
       }
       items.push({ id: "sep", separator: true });
       items.push({
         id: "passbox",
-        label: "密码箱",
-        onClick: () => {
-          setActiveIndex(null);
-          setPassboxOpen(true);
-        },
+        label: t("passbox"),
+        onClick: () => switchModule("passbox"),
+      });
+      items.push({
+        id: "notepad",
+        label: t("notepad"),
+        onClick: () => switchModule("notepad"),
       });
       openCtxMenu(e, items, setCtxMenu);
     },
-    [vault, loading, pickVault, loadImages],
+    [vault, loading, pickVault, loadImages, t, switchModule],
   );
 
   // 灯箱：网格/瀑布点图后；单张模式始终看图
@@ -673,45 +724,187 @@ export default function App() {
           onDoubleClick={() => void appWindow.toggleMaximize()}
         >
           <div className="brand" data-tauri-drag-region>
-            <span className="logo">FLYPHOTO</span>
+            <span className="logo">{t("appName")}</span>
           </div>
           <div className="topbar-right">
+            <div className="actions">
+              <ThemeButton />
+              <LangButton />
+            </div>
             <WinControls />
           </div>
         </header>
         <div className="empty">
-          <p className="muted">正在打开…</p>
+          <p className="muted">{t("booting")}</p>
         </div>
       </div>
     );
   }
 
-  if (passboxOpen) {
-    return <Passbox onBackToGallery={() => setPassboxOpen(false)} />;
-  }
+  const moduleNav = (
+    <nav className="module-nav" aria-label="modules">
+      <button
+        type="button"
+        className={appModule === "gallery" ? "icon-btn on" : "icon-btn"}
+        title={t("photos") === "photos" ? "Library" : "图库"}
+        onClick={() => switchModule("gallery")}
+      >
+        <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+      </button>
+      <button
+        type="button"
+        className={appModule === "passbox" ? "icon-btn on" : "icon-btn"}
+        title={t("passbox")}
+        onClick={() => switchModule("passbox")}
+      >
+        <Lock size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+      </button>
+      <button
+        type="button"
+        className={appModule === "notepad" ? "icon-btn on" : "icon-btn"}
+        title={t("notepad")}
+        onClick={() => switchModule("notepad")}
+      >
+        <FileText size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+      </button>
+    </nav>
+  );
+
+  /** 图库预览大图：沉浸式顶栏（返回 + 文件名） */
+  const galleryLightboxChrome = viewing && lightboxOpen && appModule === "gallery";
+
+  /** 右侧：当前模块工具 + 语言（窗控始终在最右） */
+  const topbarActions = (
+    <div className="actions">
+      {appModule === "gallery" &&
+        (viewing ? (
+          <>
+            <button type="button" className="icon-btn" title={t("zoomOut")} onClick={zoomOut}>
+              <Minus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+            <button type="button" className="icon-btn zoom-pct" title={t("zoomReset")} onClick={zoomReset}>
+              {Math.round(zoom * 100)}%
+            </button>
+            <button type="button" className="icon-btn" title={t("zoomIn")} onClick={zoomIn}>
+              <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              title={t("copy")}
+              onClick={() => copyImage(viewing)}
+            >
+              <Copy size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+            <button
+              type="button"
+              className="icon-btn danger"
+              title={t("delete")}
+              onClick={() => deleteImage(viewing, currentIndex!)}
+            >
+              <Trash2 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+          </>
+        ) : (
+          <>
+            {vault && (
+              <label
+                className={deepScan ? "scan-switch on" : "scan-switch"}
+                title={deepScan ? t("deepScanOn") : t("deepScanOff")}
+              >
+                <FolderSearch size={15} strokeWidth={1.75} absoluteStrokeWidth />
+                <span className="scan-switch-label">{t("deepScan")}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={deepScan}
+                  className="scan-switch-track"
+                  disabled={loading}
+                  onClick={() => setDeepScanAndReload(!deepScan)}
+                >
+                  <span className="scan-switch-knob" />
+                </button>
+              </label>
+            )}
+            <button
+              type="button"
+              className="icon-btn"
+              title={vault ? t("changeFolder") : t("pickFolder")}
+              onClick={pickVault}
+            >
+              <FolderOpen size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+            {vault && (
+              <button
+                type="button"
+                className="icon-btn"
+                title={t("refresh")}
+                onClick={() => loadImages(vault, deepScanRef.current)}
+                disabled={loading}
+              >
+                <RefreshCw size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+              </button>
+            )}
+            {vault && (
+              <>
+                <button
+                  type="button"
+                  className={viewMode === "grid" ? "icon-btn on" : "icon-btn"}
+                  title={t("grid")}
+                  onClick={() => setMode("grid")}
+                >
+                  <LayoutGrid size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
+                <button
+                  type="button"
+                  className={viewMode === "waterfall" ? "icon-btn on" : "icon-btn"}
+                  title={t("waterfall")}
+                  onClick={() => setMode("waterfall")}
+                >
+                  <Columns3 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
+                <button
+                  type="button"
+                  className={viewMode === "single" ? "icon-btn on" : "icon-btn"}
+                  title={t("single")}
+                  onClick={() => setMode("single")}
+                >
+                  <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
+              </>
+            )}
+          </>
+        ))}
+      {(appModule === "passbox" || appModule === "notepad") && moduleChrome?.tools}
+      <ThemeButton />
+      <LangButton />
+    </div>
+  );
 
   return (
     <div className="app">
-      {/* 唯一顶栏：左标题 · 中操作 · 右 ─ □ ✕ */}
+      {/*
+        唯一顶栏产品逻辑：
+        左 FLYBOX + 三模块 + 当前场景信息
+        右 当前模块工具 + 语言 + 窗控
+        大图预览时临时沉浸：返回 + 文件名
+      */}
       <header
         className="topbar"
         data-tauri-drag-region
         onDoubleClick={() => void appWindow.toggleMaximize()}
       >
         <div className="brand" data-tauri-drag-region>
-          {viewing ? (
+          {galleryLightboxChrome ? (
             <>
-              {/* 大图预览：返回放左侧，最显眼 */}
-              {lightboxOpen && (
-                <button
-                  type="button"
-                  className="icon-btn brand-back"
-                  title="返回图库"
-                  onClick={closeLightbox}
-                >
-                  <ArrowLeft size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-              )}
+              <button
+                type="button"
+                className="icon-btn brand-back"
+                title={t("backGallery")}
+                onClick={closeLightbox}
+              >
+                <ArrowLeft size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+              </button>
               <span className="viewer-title" title={viewing.path} data-tauri-drag-region>
                 {viewing.name}
                 <span className="muted">
@@ -723,128 +916,75 @@ export default function App() {
           ) : (
             <>
               <span className="logo" data-tauri-drag-region>
-                FLYPHOTO
+                {t("appName")}
               </span>
-              {vault ? (
-                <>
-                  <span className="vault-path" title={vault} data-tauri-drag-region>
-                    {folderName}
-                  </span>
-                  {!loading && images.length > 0 && (
-                    <span className="count-label" data-tauri-drag-region>
-                      {images.length} 张图片
+              {moduleNav}
+              {appModule === "gallery" &&
+                (vault ? (
+                  <div className="brand-context" data-tauri-drag-region>
+                    <span className="brand-sep" aria-hidden />
+                    <span className="vault-path" title={vault} data-tauri-drag-region>
+                      {folderName}
                     </span>
-                  )}
-                </>
-              ) : (
-                <span className="muted" data-tauri-drag-region>
-                  未选择图库
-                </span>
-              )}
+                    {!loading && images.length > 0 && (
+                      <span className="count-label" data-tauri-drag-region>
+                        {images.length} {t("photos")}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="brand-context" data-tauri-drag-region>
+                    <span className="brand-sep" aria-hidden />
+                    <span className="vault-path muted" data-tauri-drag-region>
+                      {t("noVault")}
+                    </span>
+                  </div>
+                ))}
+              {(appModule === "passbox" || appModule === "notepad") &&
+                (moduleChrome?.title || moduleChrome?.meta) && (
+                  <div className="brand-context" data-tauri-drag-region>
+                    <span className="brand-sep" aria-hidden />
+                    {moduleChrome?.title ? (
+                      <span className="module-context" data-tauri-drag-region>
+                        {moduleChrome.title}
+                      </span>
+                    ) : null}
+                    {moduleChrome?.meta ? (
+                      <span className="count-label" data-tauri-drag-region>
+                        {moduleChrome.meta}
+                      </span>
+                    ) : null}
+                  </div>
+                )}
             </>
           )}
         </div>
 
         <div className="topbar-right">
-          <div className="actions">
-            {viewing ? (
-              <>
-                <button type="button" className="icon-btn" title="缩小" onClick={zoomOut}>
-                  <Minus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button type="button" className="icon-btn zoom-pct" title="重置缩放" onClick={zoomReset}>
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button type="button" className="icon-btn" title="放大" onClick={zoomIn}>
-                  <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="复制"
-                  onClick={() => copyImage(viewing)}
-                >
-                  <Copy size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn danger"
-                  title="删除"
-                  onClick={() => deleteImage(viewing, currentIndex!)}
-                >
-                  <Trash2 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title={vault ? "更换文件夹" : "选择文件夹"}
-                  onClick={pickVault}
-                >
-                  <FolderOpen size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="密码箱"
-                  onClick={() => {
-                    setActiveIndex(null);
-                    setPassboxOpen(true);
-                  }}
-                >
-                  <Lock size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                {vault && (
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    title="刷新"
-                    onClick={() => loadImages(vault)}
-                    disabled={loading}
-                  >
-                    <RefreshCw size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                  </button>
-                )}
-                {vault && (
-                  <>
-                    <button
-                      type="button"
-                      className={viewMode === "grid" ? "icon-btn on" : "icon-btn"}
-                      title="网格"
-                      onClick={() => setMode("grid")}
-                    >
-                      <LayoutGrid size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                    </button>
-                    <button
-                      type="button"
-                      className={viewMode === "waterfall" ? "icon-btn on" : "icon-btn"}
-                      title="瀑布"
-                      onClick={() => setMode("waterfall")}
-                    >
-                      <Columns3 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                    </button>
-                    <button
-                      type="button"
-                      className={viewMode === "single" ? "icon-btn on" : "icon-btn"}
-                      title="单张"
-                      onClick={() => setMode("single")}
-                    >
-                      <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                    </button>
-                  </>
-                )}
-              </>
-            )}
-          </div>
+          {topbarActions}
           <WinControls />
         </div>
       </header>
 
-      {error && <div className="banner error">{error}</div>}
+      {appModule === "passbox" && (
+        <div className="module-body">
+          <Passbox
+            embedded
+            onBackToGallery={() => switchModule("gallery")}
+            onChromeChange={setModuleChrome}
+          />
+        </div>
+      )}
 
-      {!vault && (
+      {appModule === "notepad" && (
+        <div className="module-body">
+          <Notepad embedded onChromeChange={setModuleChrome} />
+        </div>
+      )}
+
+      {appModule === "gallery" && error && <div className="banner error">{error}</div>}
+
+      {appModule === "gallery" && !vault && (
         <div
           className="empty"
           onContextMenu={(e) => {
@@ -853,42 +993,47 @@ export default function App() {
               [
                 {
                   id: "pick",
-                  label: "选择图库文件夹",
+                  label: t("pickFolder"),
                   onClick: () => void pickVault(),
                 },
                 { id: "sep", separator: true },
                 {
                   id: "passbox",
-                  label: "密码箱",
-                  onClick: () => setPassboxOpen(true),
+                  label: t("passbox"),
+                  onClick: () => switchModule("passbox"),
+                },
+                {
+                  id: "notepad",
+                  label: t("notepad"),
+                  onClick: () => switchModule("notepad"),
                 },
               ],
               setCtxMenu,
             );
           }}
         >
-          <h1>像打开一个文件夹一样</h1>
-          <p>指定一个目录作为图库，打开即可浏览里面的图片。</p>
-          <button type="button" className="icon-btn on empty-pick" title="选择图库文件夹" onClick={pickVault}>
+          <h1>{t("emptyTitle")}</h1>
+          <p>{t("emptyDesc")}</p>
+          <button type="button" className="icon-btn on empty-pick" title={t("pickFolder")} onClick={pickVault}>
             <FolderOpen size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-            <span className="icon-btn-label">选择图库文件夹</span>
+            <span className="icon-btn-label">{t("pickFolder")}</span>
           </button>
         </div>
       )}
 
       {/* Keep gallery mounted under lightbox so scroll position is not lost. */}
-      {vault && !singleOpen && (
+      {appModule === "gallery" && vault && !singleOpen && (
         <main
           className={lightboxOpen ? "content content-hold" : "content"}
           ref={bindContent}
           aria-hidden={lightboxOpen}
           onContextMenu={onGalleryBgContext}
         >
-          {loading && <p className="status">扫描中…</p>}
+          {loading && <p className="status">{t("scanning")}</p>}
           {!loading && images.length === 0 && (
             <div className="empty compact">
-              <p>这个文件夹里还没有图片</p>
-              <p className="muted">把图片放进该文件夹后点「刷新」</p>
+              <p>{t("noImages")}</p>
+              <p className="muted">{t("noImagesHint")}</p>
             </div>
           )}
           {!loading && images.length > 0 && (
@@ -918,7 +1063,11 @@ export default function App() {
         </main>
       )}
 
-      {vault && showViewer && currentIndex != null && images[currentIndex] && (
+      {appModule === "gallery" &&
+        vault &&
+        showViewer &&
+        currentIndex != null &&
+        images[currentIndex] && (
         <div className={viewMode === "single" ? "viewer page" : "viewer overlay"}>
           <div
             className={zoom > 1 ? "stage stage-zoomed" : "stage"}

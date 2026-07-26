@@ -1,17 +1,58 @@
 /* Pencil: 极深黑顶栏 · 无胶囊 · 无线框 · 右上 ─□✕ · 网格/瀑布/单张 */
 
-:root {
+:root,
+[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0a0a0a;
   --bg-elev: #121212;
+  --bg-topbar: #000000;
+  --bg-panel: #0a0a0a;
+  --bg-hover: #111111;
+  --bg-active: #161616;
+  --bg-input: #0e0e0e;
   --text: #f2f2f2;
   --muted: #5c5c5c;
   --soft: #b0b0b0;
+  --icon: #b0b0b0;
+  --icon-on: #ffffff;
+  --border: #141414;
+  --border-strong: #2a2a2a;
+  --menu-bg: #161616;
+  --menu-hover: #252525;
   --danger: #e07070;
+  --danger-soft: #ff9a9a;
+  --shadow: rgba(0, 0, 0, 0.55);
   --topbar-h: 40px;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  /* Noto Sans SC Variable（思源黑体 SC） */
+  --flybox-font: "Noto Sans SC Variable", "Noto Sans SC", "Source Han Sans SC",
+    "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: var(--flybox-font);
   font-size: 14px;
   line-height: 1.45;
+}
+
+/* 浅色：一套变量覆盖主色，点太阳/月亮切换 */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f3f3;
+  --bg-elev: #ffffff;
+  --bg-topbar: #ffffff;
+  --bg-panel: #fafafa;
+  --bg-hover: #eeeeee;
+  --bg-active: #e6e6e6;
+  --bg-input: #ffffff;
+  --text: #1a1a1a;
+  --muted: #8a8a8a;
+  --soft: #555555;
+  --icon: #666666;
+  --icon-on: #111111;
+  --border: #e4e4e4;
+  --border-strong: #d0d0d0;
+  --menu-bg: #ffffff;
+  --menu-hover: #f0f0f0;
+  --danger: #d05050;
+  --danger-soft: #c03030;
+  --shadow: rgba(0, 0, 0, 0.12);
 }
 
 * {
@@ -70,8 +111,9 @@ button:focus-visible {
   gap: 12px;
   height: var(--topbar-h);
   padding: 0 0 0 16px;
-  background: #000;
+  background: var(--bg-topbar);
   border: 0;
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 100;
@@ -83,50 +125,161 @@ button:focus-visible {
 .brand {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   min-width: 0;
   flex: 1;
+  height: 100%;
+}
+
+/* 模块图标 | 场景文字：分割线 + 垂直居中 + 更亮 */
+.brand-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: 100%;
+  line-height: 1;
+}
+
+.brand-sep {
+  flex-shrink: 0;
+  width: 1px;
+  height: 14px;
+  background: #3a3a3a;
+  margin: 0 2px;
+}
+
+[data-theme="light"] .brand-sep {
+  background: #d0d0d0;
 }
 
 .brand-back {
   flex-shrink: 0;
   height: 100%;
   min-height: var(--topbar-h);
-  color: #b0b0b0;
+  color: var(--icon);
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
 
 .brand-back:hover {
-  color: #fff;
+  color: var(--icon-on);
+}
+
+/* 顶栏左侧：图库 / 密码箱 / 记事本 三模块 */
+.module-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  height: 100%;
+  margin-left: 4px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.module-nav .icon-btn {
+  opacity: 0.55;
+}
+
+.module-nav .icon-btn:hover {
+  opacity: 0.9;
+}
+
+.module-nav .icon-btn.on {
+  opacity: 1;
+  color: var(--icon-on);
+}
+
+.module-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏场景文案（密码箱「列表 / 编辑」等），与 vault-path 同级 */
+.module-context {
+  color: #e8e8e8;
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 28vw;
+}
+
+[data-theme="light"] .module-context {
+  color: #222;
+}
+
+.passbox-embedded,
+.notepad-embedded {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.passbox-embedded > .passbox-center,
+.passbox-embedded > .content,
+.passbox-embedded > .banner,
+.notepad-embedded > .notepad {
+  flex: 1;
+  min-height: 0;
 }
 
 .logo {
   font-weight: 600;
   font-size: 14px;
   letter-spacing: 0.04em;
-  color: #f2f2f2;
+  color: var(--text);
 }
 
 .vault-path,
 .viewer-title {
-  color: #5c5c5c;
+  color: #e8e8e8;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 36vw;
   font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
+.vault-path.muted {
+  color: #888;
 }
 
 .viewer-title {
-  color: #8a8a8a;
+  color: #d0d0d0;
 }
 
 .count-label {
-  color: #555;
+  color: #c8c8c8;
   font-size: 12px;
+  line-height: 1;
   white-space: nowrap;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+[data-theme="light"] .vault-path,
+[data-theme="light"] .viewer-title {
+  color: #222;
+}
+
+[data-theme="light"] .count-label {
+  color: #555;
+}
+
+[data-theme="light"] .vault-path.muted {
+  color: #888;
 }
 
 .topbar-right {
@@ -155,7 +308,7 @@ button:focus-visible {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: #b0b0b0;
+  color: var(--icon);
   padding: 0;
   cursor: pointer;
   display: inline-flex;
@@ -177,7 +330,7 @@ button:focus-visible {
 }
 
 .icon-btn:hover {
-  color: #fff;
+  color: var(--icon-on);
   background: transparent;
 }
 
@@ -187,15 +340,15 @@ button:focus-visible {
 }
 
 .icon-btn.on {
-  color: #fff;
+  color: var(--icon-on);
 }
 
 .icon-btn.danger {
-  color: #e07070;
+  color: var(--danger);
 }
 
 .icon-btn.danger:hover {
-  color: #ff9a9a;
+  color: var(--danger-soft);
 }
 
 .icon-btn.zoom-pct {
@@ -203,12 +356,90 @@ button:focus-visible {
   min-width: 40px;
   padding: 0 6px;
   font-size: 12px;
-  color: #b0b0b0;
+  color: var(--icon);
 }
 
 .icon-btn-label {
   font-size: 13px;
   color: inherit;
+}
+
+/* 图库 · 深扫开关 */
+.scan-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 8px 0 6px;
+  color: var(--icon);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.scan-switch.on {
+  color: var(--icon-on);
+}
+
+.scan-switch-label {
+  line-height: 1;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.scan-switch-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: #333;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.scan-switch.on .scan-switch-track {
+  background: #4a7cff;
+}
+
+.scan-switch-track:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.scan-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #eee;
+  transition: transform 0.15s ease;
+  pointer-events: none;
+}
+
+.scan-switch.on .scan-switch-knob {
+  transform: translateX(16px);
+}
+
+[data-theme="light"] .scan-switch-track {
+  background: #ccc;
+}
+
+[data-theme="light"] .scan-switch.on .scan-switch-track {
+  background: #3b6cf0;
+}
+
+[data-theme="light"] .scan-switch-knob {
+  background: #fff;
 }
 
 /* legacy text btn if any remains */
@@ -234,7 +465,7 @@ button:focus-visible {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: #b0b0b0;
+  color: var(--icon);
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
@@ -244,8 +475,8 @@ button:focus-visible {
 }
 
 .win-btn:hover {
-  background: #1a1a1a;
-  color: #fff;
+  background: var(--bg-hover);
+  color: var(--icon-on);
 }
 
 .win-btn.close:hover {
@@ -1060,16 +1291,455 @@ button:focus-visible {
   border: 0;
 }
 
+/* —— 记事本（左列表 + 右编辑，本地自动保存）—— */
+.notepad {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--bg);
+}
+
+.notepad-side {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border, #141414);
+  background: var(--bg-panel, #0a0a0a);
+  min-height: 0;
+}
+
+.notepad-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 6px 0 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.notepad-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.notepad-search input::placeholder {
+  color: var(--muted);
+}
+
+/* 列表区：新建 / 删除（不进全局顶栏） */
+.notepad-side-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 100%;
+}
+
+.notepad-side-actions .icon-btn {
+  width: 32px;
+  min-height: 32px;
+  height: 100%;
+  color: #888;
+}
+
+.notepad-side-actions .icon-btn:hover {
+  color: #eee;
+}
+
+.notepad-side-actions .icon-btn.danger:hover {
+  color: var(--danger);
+}
+
+.notepad-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) var(--bg);
+}
+
+.notepad-empty-list {
+  padding: 24px 16px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.notepad-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.notepad-item:hover {
+  background: var(--bg-hover);
+}
+
+.notepad-item.on {
+  background: var(--bg-active);
+}
+
+.notepad-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notepad-item-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.notepad-item-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--soft);
+  flex: 1;
+  min-width: 0;
+}
+
+.notepad-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.notepad-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border, #141414);
+  flex-shrink: 0;
+  background: var(--bg-elev, #0c0c0c);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+.notepad-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--icon);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.notepad-tool.icon-only {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  font-weight: 400;
+}
+
+.notepad-tool.size-letter {
+  width: 26px;
+  min-width: 26px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.notepad-tool.size-letter.xl {
+  width: 30px;
+  min-width: 30px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.notepad-tool:hover {
+  color: var(--icon-on);
+  background: var(--bg-hover);
+}
+
+.notepad-tool.on {
+  color: var(--icon-on);
+  background: var(--bg-active);
+}
+
+.notepad-tool-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-strong);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.notepad-title {
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  padding: 16px 28px 8px;
+  width: 100%;
+}
+
+.notepad-title::placeholder {
+  color: var(--muted);
+}
+
+.notepad-body {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.65;
+  padding: 8px 28px 12px;
+  width: 100%;
+}
+
+.notepad-body::placeholder {
+  color: var(--muted);
+}
+
+.notepad-rich {
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.notepad-rich:empty::before {
+  content: attr(data-placeholder);
+  color: #3a3a3a;
+  pointer-events: none;
+}
+
+.notepad-rich b,
+.notepad-rich strong {
+  font-weight: 700;
+}
+
+.notepad-rich i,
+.notepad-rich em {
+  font-style: italic;
+}
+
+.notepad-rich u {
+  text-decoration: underline;
+}
+
+/* 正文内嵌图片：粘贴 / 加号插入 */
+.notepad-rich img,
+.notepad-rich img.notepad-img {
+  max-width: min(100%, 720px);
+  height: auto;
+  display: block;
+  margin: 10px 0;
+  border-radius: 0;
+  -webkit-user-select: none;
+  user-select: none;
+  object-fit: contain;
+}
+
+/* 表情选择 */
+.notepad-emoji-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+}
+
+.notepad-emoji-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(10, 28px);
+  gap: 2px;
+  padding: 8px;
+  background: var(--menu-bg, #161616);
+  border: 1px solid var(--border-strong, #2a2a2a);
+  box-shadow: 0 8px 24px var(--shadow, rgba(0, 0, 0, 0.55));
+  max-width: min(320px, 90vw);
+}
+
+.notepad-emoji-btn {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+}
+
+.notepad-emoji-btn:hover {
+  background: var(--menu-hover, #252525);
+}
+
+.notepad-colors {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.notepad-colors-icon {
+  color: #666;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+
+.notepad-color-dot {
+  width: 14px;
+  height: 14px;
+  border: 1px solid #333;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* 高亮色：略方一点，跟文字色圆点区分 */
+.notepad-color-dot.hl {
+  border-radius: 3px;
+  border-color: #3a3a3a;
+}
+
+.notepad-color-dot.hl.none {
+  background:
+    linear-gradient(
+      135deg,
+      transparent 46%,
+      #666 46%,
+      #666 54%,
+      transparent 54%
+    ),
+    #1a1a1a;
+}
+
+.notepad-color-dot:hover {
+  border-color: #888;
+  transform: scale(1.12);
+}
+
+/* 高亮块：亮底 + 深色字，选中后一眼能看见 */
+.notepad-rich span[data-hl="1"],
+.notepad-rich span[style*="background-color"],
+.notepad-rich span[style*="background"],
+.notepad-rich font[style*="background"] {
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+.notepad-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 28px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.notepad-blank {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #555;
+  font-size: 13px;
+}
+
+.notepad-blank-btn {
+  width: 160px;
+}
+
+/* —— 悬停提示（替代系统黄框，跟右键菜单同系） —— */
+.fly-tip {
+  position: fixed;
+  z-index: 10001;
+  transform: translateX(-50%);
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 6px 10px;
+  background: var(--menu-bg);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 6px 18px var(--shadow);
+  color: var(--text);
+  font-family: var(--flybox-font);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  border-radius: 0;
+  pointer-events: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.fly-tip-above {
+  transform: translateX(-50%);
+}
+
 /* —— 桌面右键菜单 —— */
 .ctx-menu {
   position: fixed;
   z-index: 10000;
   min-width: 168px;
   padding: 4px 0;
-  background: #161616;
-  border: 1px solid #2a2a2a;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  color: #e8e8e8;
+  background: var(--menu-bg);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text);
   -webkit-user-select: none;
   user-select: none;
 }
@@ -1082,7 +1752,7 @@ button:focus-visible {
   padding: 0 14px;
   border: 0;
   background: transparent;
-  color: #e0e0e0;
+  color: var(--text);
   font: inherit;
   font-size: 13px;
   text-align: left;
@@ -1091,8 +1761,8 @@ button:focus-visible {
 }
 
 .ctx-item:hover:not(:disabled) {
-  background: #252525;
-  color: #fff;
+  background: var(--menu-hover);
+  color: var(--icon-on);
 }
 
 .ctx-item:disabled {
@@ -1101,12 +1771,105 @@ button:focus-visible {
 }
 
 .ctx-item.danger {
-  color: #e07070;
+  color: var(--danger);
 }
 
 .ctx-item.danger:hover:not(:disabled) {
-  background: #2a1515;
-  color: #ff9a9a;
+  background: color-mix(in srgb, var(--danger) 12%, var(--menu-bg));
+  color: var(--danger-soft);
+}
+
+/* —— 浅色：补齐仍写死深色的主要面板 —— */
+[data-theme="light"] .content,
+[data-theme="light"] .empty,
+[data-theme="light"] .viewer,
+[data-theme="light"] .viewer.page,
+[data-theme="light"] .viewer.overlay,
+[data-theme="light"] .stage,
+[data-theme="light"] .notepad,
+[data-theme="light"] .notepad-side,
+[data-theme="light"] .notepad-main,
+[data-theme="light"] .notepad-toolbar,
+[data-theme="light"] .passbox-center,
+[data-theme="light"] .passbox-list {
+  background: var(--bg);
+  color: var(--text);
+}
+
+[data-theme="light"] .notepad-side,
+[data-theme="light"] .notepad-toolbar,
+[data-theme="light"] .notepad-search,
+[data-theme="light"] .notepad-status,
+[data-theme="light"] .passbox-tabs {
+  border-color: var(--border);
+}
+
+[data-theme="light"] .notepad-item:hover {
+  background: var(--bg-hover);
+}
+
+[data-theme="light"] .notepad-item.on {
+  background: var(--bg-active);
+}
+
+[data-theme="light"] .notepad-item-title,
+[data-theme="light"] .notepad-title {
+  color: var(--text);
+}
+
+[data-theme="light"] .notepad-body,
+[data-theme="light"] .notepad-rich {
+  color: var(--text);
+}
+
+[data-theme="light"] .notepad-tool {
+  color: var(--icon);
+}
+
+[data-theme="light"] .notepad-tool:hover,
+[data-theme="light"] .notepad-tool.on {
+  color: var(--icon-on);
+  background: var(--bg-hover);
+}
+
+[data-theme="light"] .passbox-row:hover,
+[data-theme="light"] .passbox-card:hover {
+  background: var(--bg-hover);
+}
+
+[data-theme="light"] .passbox-tab.on {
+  color: var(--icon-on);
+}
+
+[data-theme="light"] .toast {
+  background: var(--menu-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+[data-theme="light"] .tile,
+[data-theme="light"] .tile-ph {
+  background: var(--bg-elev);
+}
+
+[data-theme="light"] input,
+[data-theme="light"] textarea {
+  color: var(--text);
+  background: var(--bg-input);
+}
+
+[data-theme="light"] .passbox-form input,
+[data-theme="light"] .passbox-form textarea,
+[data-theme="light"] .field input,
+[data-theme="light"] .field textarea {
+  background: var(--bg-input);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+[data-theme="light"] .passbox-primary {
+  color: #fff;
 }
 
 .ctx-sep {
