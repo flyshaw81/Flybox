@@ -24,6 +24,9 @@ import {
 } from "lucide-react";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { useI18n } from "./i18n";
+import { useTheme } from "./theme";
+import logoDark from "./assets/flyshaw-logo-white-transparent.png";
+import logoLight from "./assets/flyshaw-logo-transparent.png";
 
 type ModuleChrome = {
   title?: string;
@@ -369,6 +372,7 @@ export default function Passbox({
   onChromeChange?: (chrome: ModuleChrome | null) => void;
 }) {
   const { t, locale } = useI18n();
+  const { theme } = useTheme();
   const labels = useMemo(() => {
     const m = { ...TYPE_LABEL };
     (Object.keys(TYPE_LABEL) as EntryType[]).forEach((k) => {
@@ -1084,8 +1088,15 @@ export default function Passbox({
 
       {screen === "unlock" && (
         <main className="passbox-center passbox-unlock">
-          <Lock size={32} strokeWidth={1.5} color="#666" absoluteStrokeWidth />
-          <h1 className="passbox-h1">{t("unlockTitle")}</h1>
+          <div className="passbox-unlock-brand" aria-label={t("unlockTitle")}>
+            <img
+              className="passbox-unlock-logo"
+              src={theme === "light" ? logoLight : logoDark}
+              alt=""
+              draggable={false}
+            />
+            <span className="passbox-unlock-name">{t("appName")}</span>
+          </div>
           <div className="passbox-form passbox-unlock-form">
             {(() => {
               const until = status?.lockUntilMs ?? 0;

@@ -143,6 +143,7 @@ button:focus-visible {
 
 .brand-sep {
   flex-shrink: 0;
+  align-self: center;
   width: 1px;
   height: 14px;
   background: #3a3a3a;
@@ -173,7 +174,7 @@ button:focus-visible {
   justify-content: center;
   gap: 0;
   height: 100%;
-  margin-left: 4px;
+  margin-left: 0;
   flex-shrink: 0;
   -webkit-app-region: no-drag;
   app-region: no-drag;
@@ -203,6 +204,7 @@ button:focus-visible {
 .module-context {
   color: #e8e8e8;
   font-size: 13px;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   overflow: hidden;
@@ -232,10 +234,42 @@ button:focus-visible {
 }
 
 .logo {
-  font-weight: 600;
-  font-size: 14px;
-  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  /* 不拉满顶栏高度，与 module-nav 图标同一光学中线 */
+  height: auto;
+  align-self: center;
+  flex-shrink: 0;
+  line-height: 0;
+  /* 笔刷标/字重视觉偏下，略上移与 16px 图标对齐 */
+  transform: translateY(-1px);
+}
+
+.logo-img {
+  display: block;
+  height: 16px;
+  width: auto;
+  max-width: 40px;
+  object-fit: contain;
+  object-position: center;
+  flex-shrink: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.logo-text {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.08em;
   color: var(--text);
+  white-space: nowrap;
+  line-height: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .vault-path,
@@ -246,6 +280,7 @@ button:focus-visible {
   white-space: nowrap;
   max-width: 36vw;
   font-size: 13px;
+  font-weight: 600;
   line-height: 1;
   display: inline-flex;
   align-items: center;
@@ -253,6 +288,7 @@ button:focus-visible {
 
 .vault-path.muted {
   color: #888;
+  font-weight: 500;
 }
 
 .viewer-title {
@@ -260,8 +296,9 @@ button:focus-visible {
 }
 
 .count-label {
-  color: #c8c8c8;
+  color: #d0d0d0;
   font-size: 12px;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   flex-shrink: 0;
@@ -272,10 +309,12 @@ button:focus-visible {
 [data-theme="light"] .vault-path,
 [data-theme="light"] .viewer-title {
   color: #222;
+  font-weight: 600;
 }
 
 [data-theme="light"] .count-label {
-  color: #555;
+  color: #444;
+  font-weight: 600;
 }
 
 [data-theme="light"] .vault-path.muted {
@@ -964,11 +1003,46 @@ button:focus-visible {
 }
 
 .passbox-unlock {
-  gap: 16px;
+  gap: 14px;
+  padding: 24px 24px;
+  justify-content: center;
+}
+
+.passbox-unlock-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 0 0 4px;
+  line-height: 0;
+}
+
+.passbox-unlock-logo {
+  display: block;
+  width: auto;
+  height: 44px;
+  max-width: 120px;
+  object-fit: contain;
+  object-position: center;
+  margin: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  opacity: 0.95;
+}
+
+.passbox-unlock-name {
+  font-weight: 800;
+  font-size: 28px;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .passbox-unlock-form {
   gap: 10px;
+  margin-top: 0;
 }
 
 .passbox-forgot-row {
@@ -2291,8 +2365,42 @@ button:focus-visible {
   background: var(--bg-hover);
 }
 
+/* 浅色：列表标题/摘要必须够深，否则白底上几乎看不见 */
+[data-theme="light"] .passbox-row-title,
+[data-theme="light"] .passbox-card-title {
+  color: #1a1a1a;
+  font-weight: 600;
+}
+
+[data-theme="light"] .passbox-row-meta,
+[data-theme="light"] .passbox-card-type,
+[data-theme="light"] .passbox-card-preview,
+[data-theme="light"] .passbox-card-lines {
+  color: #555;
+}
+
+[data-theme="light"] .passbox-row-ico,
+[data-theme="light"] .passbox-copy,
+[data-theme="light"] .passbox-card-copy {
+  color: #666 !important;
+}
+
+[data-theme="light"] .passbox-tab {
+  color: #777;
+}
+
+[data-theme="light"] .passbox-tab:hover {
+  color: #333;
+}
+
 [data-theme="light"] .passbox-tab.on {
   color: var(--icon-on);
+  font-weight: 600;
+}
+
+[data-theme="light"] .passbox-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
 }
 
 [data-theme="light"] .toast {

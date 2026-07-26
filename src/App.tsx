@@ -32,7 +32,9 @@ import Passbox from "./Passbox";
 import Notepad from "./Notepad";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { LangButton, useI18n } from "./i18n";
-import { ThemeButton } from "./theme";
+import { ThemeButton, useTheme } from "./theme";
+import logoDark from "./assets/flyshaw-logo-white-transparent.png";
+import logoLight from "./assets/flyshaw-logo-transparent.png";
 
 /** 子模块上报到唯一顶栏的场景信息 + 右侧工具 */
 export type ModuleChrome = {
@@ -44,6 +46,19 @@ export type ModuleChrome = {
 const appWindow = getCurrentWindow();
 const ICO = 16;
 const ICO_WIN = 14;
+
+/** 顶栏品牌：手写标 + FLYBOX 名；深色用白标，浅色用黑标 */
+function BrandLogo() {
+  const { theme } = useTheme();
+  const { t } = useI18n();
+  const src = theme === "light" ? logoLight : logoDark;
+  return (
+    <span className="logo" data-tauri-drag-region title={t("appName")}>
+      <img className="logo-img" src={src} alt="" draggable={false} />
+      <span className="logo-text">{t("appName")}</span>
+    </span>
+  );
+}
 
 type ImageEntry = {
   path: string;
@@ -726,7 +741,7 @@ export default function App() {
           onDoubleClick={() => void appWindow.toggleMaximize()}
         >
           <div className="brand" data-tauri-drag-region>
-            <span className="logo">{t("appName")}</span>
+            <BrandLogo />
           </div>
           <div className="topbar-right">
             <div className="actions">
@@ -909,9 +924,8 @@ export default function App() {
             </>
           ) : (
             <>
-              <span className="logo" data-tauri-drag-region>
-                {t("appName")}
-              </span>
+              <BrandLogo />
+              <span className="brand-sep" aria-hidden />
               {moduleNav}
               {appModule === "gallery" &&
                 (vault ? (
