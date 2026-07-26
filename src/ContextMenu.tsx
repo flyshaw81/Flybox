@@ -105,8 +105,10 @@ export default function ContextMenu({
             disabled={item.disabled}
             onClick={() => {
               if (item.disabled) return;
+              const action = item.onClick;
               onClose();
-              item.onClick();
+              // 先关菜单再跑动作，避免确认框/异步被同帧卸载吞掉
+              window.setTimeout(() => action(), 0);
             }}
           >
             {item.label}

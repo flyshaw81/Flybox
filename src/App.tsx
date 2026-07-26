@@ -8,7 +8,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { load } from "@tauri-apps/plugin-store";
 import {
@@ -535,28 +535,34 @@ export default function App() {
     }
   };
 
-  const deleteImage = async (entry: ImageEntry, index: number) => {
-    const ok = window.confirm(
-      `${t("deleteConfirm")}\n\n${entry.name}\n\n${t("deleteConfirmDisk")}`,
-    );
-    if (!ok) return;
-    try {
-      await invoke("delete_image", { path: entry.path });
-      thumbUrlCache.delete(entry.path);
-      setImages((prev) => {
-        const next = prev.filter((x) => x.path !== entry.path);
-        if (next.length === 0) closeLightbox();
-        else {
-          setActiveIndex(Math.min(index, next.length - 1));
-          setZoom(1);
-        }
-        return next;
-      });
-      showToast(t("deleted"));
-    } catch (e) {
-      showToast(`${t("deleteFail")}：${e}`);
-    }
-  };
+  const deleteImage = useCallback(
+    async (entry: ImageEntry, index: number) => {
+      // 用系统对话框，不用 window.confirm：放大预览 + 右键菜单关闭后，WebView 常吞掉 confirm
+      const ok = await ask(
+        `${t("deleteConfirm")}\n\n${entry.name}\n\n${t("deleteConfirmDisk")}`,
+        { title: t("delete"), kind: "warning" },
+      );
+      if (!ok) return;
+      try {
+        await invoke("delete_image", { path: entry.path });
+        thumbUrlCache.delete(entry.path);
+        setImages((prev) => {
+          const next = prev.filter((x) => x.path !== entry.path);
+          if (next.length === 0) closeLightbox();
+          else {
+            setActiveIndex(Math.min(index, next.length - 1));
+            setZoom(1);
+            setPan({ x: 0, y: 0 });
+          }
+          return next;
+        });
+        showToast(t("deleted"));
+      } catch (e) {
+        showToast(`${t("deleteFail")}：${e}`);
+      }
+    },
+    [closeLightbox, showToast, t],
+  );
 
   const setMode = (mode: ViewMode) => {
     setViewMode(mode);
@@ -610,8 +616,9 @@ export default function App() {
       }
       return items;
     },
+    // openAt / copyImage 随渲染更新，菜单打开时会重新生成 items
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showToast, closeLightbox, t],
+    [deleteImage, showToast, closeLightbox, t],
   );
 
   const onTileContext = useCallback(
