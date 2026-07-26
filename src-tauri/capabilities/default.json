@@ -31,6 +31,7 @@
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
     "store:default",
+    "autostart:default",
     "fs:default",
     {
       "identifier": "fs:scope",

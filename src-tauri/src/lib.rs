@@ -4,13 +4,13 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::io::Cursor;
+use std::fs::{self, File};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
-use tiny_http::{Header, Response, Server};
+use tiny_http::{Header, Response, Server, StatusCode};
 use vault::VaultState;
 
 /// Frontend assets baked into the binary at compile time (from ../dist).
@@ -20,9 +20,13 @@ static UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../dist");
 const IMAGE_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "jfif", "tif", "tiff",
 ];
+/// 优先 WebView 能硬解的常见格式；mkv 仍列出，播不了会失败但不炸列表
+const VIDEO_EXTS: &[&str] = &["mp4", "webm", "mov", "m4v", "mkv", "avi"];
 
 const THUMB_MAX: u32 = 280;
 const MAX_THUMB_BYTES: u64 = 25 * 1024 * 1024;
+/// 视频不整文件解码；封面用绘制占位，超大文件也安全
+const MAX_VIDEO_LIST_BYTES: u64 = 40 * 1024 * 1024 * 1024; // 40GB 列表仍可出现
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,13 +36,30 @@ pub struct ImageEntry {
     /// Pixel size from file headers (for waterfall aspect-ratio slots).
     pub width: u32,
     pub height: u32,
+    /// "image" | "video"
+    pub kind: String,
+}
+
+fn ext_lower(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
 }
 
 fn is_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| IMAGE_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+    ext_lower(path)
+        .map(|e| IMAGE_EXTS.iter().any(|x| *x == e))
         .unwrap_or(false)
+}
+
+fn is_video(path: &Path) -> bool {
+    ext_lower(path)
+        .map(|e| VIDEO_EXTS.iter().any(|x| *x == e))
+        .unwrap_or(false)
+}
+
+fn is_media(path: &Path) -> bool {
+    is_image(path) || is_video(path)
 }
 
 /// Read dimensions from headers only (no full decode) — used by masonry packing.
@@ -84,8 +105,18 @@ fn collect_images(
             if recursive {
                 let _ = collect_images(&path, out, true);
             }
-        } else if path.is_file() && is_image(&path) {
-            let (width, height) = image_dimensions(&path);
+        } else if path.is_file() && is_media(&path) {
+            let meta_len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if is_video(&path) && meta_len > MAX_VIDEO_LIST_BYTES {
+                continue;
+            }
+            let (width, height, kind) = if is_video(&path) {
+                // 未知真实分辨率时用 16:9 槽位，避免瀑布流塌成一条线
+                (1920u32, 1080u32, "video".to_string())
+            } else {
+                let (w, h) = image_dimensions(&path);
+                (w, h, "image".to_string())
+            };
             let mtime = file_mtime_secs(&path);
             out.push((
                 mtime,
@@ -94,6 +125,7 @@ fn collect_images(
                     name,
                     width,
                     height,
+                    kind,
                 },
             ));
         }
@@ -124,8 +156,8 @@ fn delete_image(path: String) -> Result<(), String> {
     if !path.is_file() {
         return Err("文件不存在".into());
     }
-    if !is_image(&path) {
-        return Err("不是支持的图片文件".into());
+    if !is_media(&path) {
+        return Err("不是支持的图片/视频文件".into());
     }
     fs::remove_file(&path).map_err(|e| format!("删除失败：{e}"))
 }
@@ -146,9 +178,57 @@ fn cache_key(path: &Path) -> String {
     hasher.update(path.to_string_lossy().as_bytes());
     hasher.update(b"|");
     hasher.update(file_stamp(path).as_bytes());
-    hasher.update(b"|v4");
+    hasher.update(b"|v5-media");
     let digest = hasher.finalize();
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 无 FFmpeg 时的视频封面：深色底 + 播放三角（缓存后网格滚动仍丝滑）
+fn make_video_placeholder_jpeg() -> Result<Vec<u8>, String> {
+    let w = THUMB_MAX;
+    let h = (THUMB_MAX as f32 * 9.0 / 16.0).round() as u32;
+    let h = h.max(1);
+    let mut rgb = image::RgbImage::new(w, h);
+    let bg = image::Rgb([0x14u8, 0x14, 0x18]);
+    for p in rgb.pixels_mut() {
+        *p = bg;
+    }
+    // 居中播放三角
+    let cx = (w / 2) as i32;
+    let cy = (h / 2) as i32;
+    let size = (h.min(w) as i32) / 5;
+    let tri = image::Rgb([0xeeu8, 0xee, 0xf0]);
+    for y in -size..=size {
+        let row = cy + y;
+        if row < 0 || row >= h as i32 {
+            continue;
+        }
+        // 向右的等腰三角：x 从 left 到 left+width
+        let half = size - y.abs();
+        let x0 = cx - size / 3;
+        let x1 = x0 + half + size / 2;
+        for x in x0..=x1 {
+            if x >= 0 && x < w as i32 {
+                // 简单斜边：右侧边界随 y 收窄
+                let progress = (x - x0) as f32 / (half + size / 2).max(1) as f32;
+                let max_y = (1.0 - progress) * size as f32;
+                if (y as f32).abs() <= max_y + 0.5 {
+                    rgb.put_pixel(x as u32, row as u32, tri);
+                }
+            }
+        }
+    }
+    let mut buf = Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 75);
+    encoder
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("编码视频封面失败：{e}"))?;
+    Ok(buf.into_inner())
 }
 
 fn thumbs_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -216,8 +296,8 @@ fn bytes_to_data_url(jpeg: &[u8]) -> String {
 #[tauri::command]
 async fn get_thumbnail(app: AppHandle, path: String) -> Result<String, String> {
     let path_buf = PathBuf::from(path.trim());
-    if !path_buf.is_file() || !is_image(&path_buf) {
-        return Err("无效图片".into());
+    if !path_buf.is_file() || !is_media(&path_buf) {
+        return Err("无效媒体文件".into());
     }
 
     let key = cache_key(&path_buf);
@@ -234,8 +314,15 @@ async fn get_thumbnail(app: AppHandle, path: String) -> Result<String, String> {
 
     let src = path_buf;
     let dest = cache_file;
+    let video = is_video(&src);
     tauri::async_runtime::spawn_blocking(move || {
-        let result = panic::catch_unwind(AssertUnwindSafe(|| make_thumbnail_jpeg(&src)));
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            if video {
+                make_video_placeholder_jpeg()
+            } else {
+                make_thumbnail_jpeg(&src)
+            }
+        }));
         match result {
             Ok(Ok(jpeg)) => {
                 let _ = fs::write(&dest, &jpeg);
@@ -247,6 +334,156 @@ async fn get_thumbnail(app: AppHandle, path: String) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("缩略图任务失败：{e}"))?
+}
+
+/// 解析 `bytes=start-end` / `bytes=start-`
+fn parse_byte_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    let s = header.trim();
+    let s = s.strip_prefix("bytes=")?;
+    // 只取第一段（Chrome 有时带多个，忽略）
+    let s = s.split(',').next()?.trim();
+    let (a, b) = s.split_once('-')?;
+    if a.is_empty() {
+        return None;
+    }
+    let start: u64 = a.parse().ok()?;
+    if start >= total {
+        return None;
+    }
+    let end = if b.is_empty() {
+        total.saturating_sub(1)
+    } else {
+        b.parse::<u64>().ok()?.min(total.saturating_sub(1))
+    };
+    if end < start {
+        return None;
+    }
+    // 单段过大时截断防 OOM；返回正确 Content-Range，播放器会继续要下一段
+    let max_chunk = 32 * 1024 * 1024u64;
+    let end = end.min(start + max_chunk - 1).min(total.saturating_sub(1));
+    Some((start, end))
+}
+
+fn header_str(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("header")
+}
+
+fn media_mime(path: &Path) -> String {
+    match ext_lower(path).as_deref() {
+        Some("mp4") | Some("m4v") => "video/mp4".into(),
+        Some("webm") => "video/webm".into(),
+        Some("mov") => "video/quicktime".into(),
+        Some("mkv") => "video/webm".into(), // WebView 更认 webm 标签；真 mkv 仍可能失败
+        Some("avi") => "video/x-msvideo".into(),
+        _ => mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string(),
+    }
+}
+
+fn respond_media_file(request: tiny_http::Request, path: &Path) {
+    let mime = media_mime(path);
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            let _ = request.respond(Response::empty(404));
+            return;
+        }
+    };
+    let total = meta.len();
+    let range_hdr = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string());
+
+    let common = || {
+        vec![
+            header_str("Content-Type", &mime),
+            header_str("Accept-Ranges", "bytes"),
+            header_str("Cache-Control", "public, max-age=0"),
+            header_str("Access-Control-Allow-Origin", "*"),
+            header_str("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length"),
+        ]
+    };
+
+    if let Some(rh) = range_hdr.as_deref() {
+        if let Some((start, end)) = parse_byte_range(rh, total) {
+            let len = (end - start + 1) as usize;
+            let mut file = match File::open(path) {
+                Ok(f) => f,
+                Err(_) => {
+                    let _ = request.respond(Response::empty(404));
+                    return;
+                }
+            };
+            if file.seek(SeekFrom::Start(start)).is_err() {
+                let _ = request.respond(Response::empty(416));
+                return;
+            }
+            let mut buf = vec![0u8; len];
+            if file.read_exact(&mut buf).is_err() {
+                let _ = request.respond(Response::empty(500));
+                return;
+            }
+            let content_range = format!("bytes {start}-{end}/{total}");
+            let mut headers = common();
+            headers.push(header_str("Content-Range", &content_range));
+            headers.push(header_str("Content-Length", &len.to_string()));
+            let response = Response::new(
+                StatusCode(206),
+                headers,
+                Cursor::new(buf),
+                Some(len),
+                None,
+            );
+            let _ = request.respond(response);
+            return;
+        }
+        let _ = request.respond(Response::empty(416));
+        return;
+    }
+
+    // 完整 GET：始终声明 Accept-Ranges，小文件读内存，大文件流式
+    if total <= 24 * 1024 * 1024 {
+        match fs::read(path) {
+            Ok(bytes) => {
+                let mut headers = common();
+                headers.push(header_str("Content-Length", &bytes.len().to_string()));
+                let response = Response::new(
+                    StatusCode(200),
+                    headers,
+                    Cursor::new(bytes),
+                    Some(total as usize),
+                    None,
+                );
+                let _ = request.respond(response);
+            }
+            Err(_) => {
+                let _ = request.respond(Response::empty(404));
+            }
+        }
+        return;
+    }
+
+    match File::open(path) {
+        Ok(file) => {
+            let mut headers = common();
+            headers.push(header_str("Content-Length", &total.to_string()));
+            let response = Response::new(
+                StatusCode(200),
+                headers,
+                file,
+                Some(total as usize),
+                None,
+            );
+            let _ = request.respond(response);
+        }
+        Err(_) => {
+            let _ = request.respond(Response::empty(404));
+        }
+    }
 }
 
 /// Pure local UI server on 127.0.0.1 (never leaves the machine, never needs system proxy).
@@ -266,7 +503,7 @@ fn spawn_local_ui_server() -> u16 {
                     None => (raw.as_str(), ""),
                 };
 
-                // Stream real disk images for the lightbox (avoid asset.localhost + proxy).
+                // Stream real disk media for lightbox / video (Range = 拖进度丝滑).
                 if path_part == "/__file" {
                     let file_path = query
                         .split('&')
@@ -280,21 +517,8 @@ fn spawn_local_ui_server() -> u16 {
                         })
                         .unwrap_or_default();
                     let path = PathBuf::from(&file_path);
-                    if path.is_file() && is_image(&path) {
-                        match fs::read(&path) {
-                            Ok(bytes) => {
-                                let mime = mime_guess::from_path(&path)
-                                    .first_or_octet_stream()
-                                    .essence_str()
-                                    .to_string();
-                                let header =
-                                    Header::from_bytes("Content-Type", mime.as_bytes()).unwrap();
-                                let _ = request.respond(Response::from_data(bytes).with_header(header));
-                            }
-                            Err(_) => {
-                                let _ = request.respond(Response::empty(404));
-                            }
-                        }
+                    if path.is_file() && is_media(&path) {
+                        respond_media_file(request, &path);
                     } else {
                         let _ = request.respond(Response::empty(404));
                     }
@@ -372,6 +596,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_autostart::Builder::new().app_name("FLYBOX").build())
         .manage(VaultState::default())
         .setup(move |app| {
             let origin = ui_origin.clone();
@@ -407,7 +632,8 @@ pub fn run() {
                     .permission("clipboard-manager:allow-read-text")
                     .permission("store:default")
                     .permission("fs:default")
-                    .permission("opener:default"),
+                    .permission("opener:default")
+                    .permission("autostart:default"),
             )?;
 
             let init_script = format!(

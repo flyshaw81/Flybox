@@ -2,9 +2,12 @@ import {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -33,6 +36,12 @@ import Notepad from "./Notepad";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { LangButton, useI18n } from "./i18n";
 import { ThemeButton, useTheme } from "./theme";
+import SettingsPopover, {
+  DEFAULT_APP_SETTINGS,
+  readAutostart,
+  setAutostart,
+  type AppSettings,
+} from "./SettingsPopover";
 import logoDark from "./assets/flyshaw-logo-white-transparent.png";
 import logoLight from "./assets/flyshaw-logo-transparent.png";
 
@@ -47,33 +56,63 @@ const appWindow = getCurrentWindow();
 const ICO = 16;
 const ICO_WIN = 14;
 
-/** 顶栏品牌：手写标 + FLYBOX 名；深色用白标，浅色用黑标 */
-function BrandLogo() {
+/** 顶栏品牌：手写标 + FLYBOX 名；点击打开设置 */
+function BrandLogo({
+  onClick,
+  btnRef,
+}: {
+  onClick: () => void;
+  btnRef?: RefObject<HTMLButtonElement | null>;
+}) {
   const { theme } = useTheme();
   const { t } = useI18n();
   const src = theme === "light" ? logoLight : logoDark;
   return (
-    <span className="logo" data-tauri-drag-region title={t("appName")}>
+    <button
+      ref={btnRef}
+      type="button"
+      className="logo logo-btn"
+      title={t("settings")}
+      onClick={onClick}
+      data-tauri-drag-region={undefined}
+    >
       <img className="logo-img" src={src} alt="" draggable={false} />
       <span className="logo-text">{t("appName")}</span>
-    </span>
+    </button>
   );
 }
+
+type MediaKind = "image" | "video";
 
 type ImageEntry = {
   path: string;
   name: string;
   width: number;
   height: number;
+  /** 后端 kind；缺省当图片（兼容旧缓存） */
+  kind?: MediaKind | string;
 };
+
+function isVideoPath(path: string, kind?: string): boolean {
+  return kind === "video" || /\.(mp4|webm|mov|m4v|mkv|avi)$/i.test(path);
+}
+
+function isVideoEntry(img: ImageEntry): boolean {
+  return isVideoPath(img.path, img.kind);
+}
 
 /** 网格 · 瀑布；点缩略图放大 = 单图预览（灯箱），不再单独设「单图模式」 */
 type ViewMode = "grid" | "waterfall";
 
 const STORE_FILE = "settings.json";
 const VAULT_KEY = "vaultPath";
-/** Slightly higher than before — still capped to avoid CPU thrash (masonic-style lazy). */
-const THUMB_CONCURRENCY = 4;
+const RESTORE_VAULT_KEY = "restoreVault";
+const DEEP_DEFAULT_KEY = "deepScanDefault";
+const START_MIN_KEY = "startMinimized";
+/** 缩略图并发：图片可高一点；视频抽帧更重，单独限流 */
+const THUMB_CONCURRENCY = 6;
+const VIDEO_THUMB_CONCURRENCY = 2;
+
 
 declare global {
   interface Window {
@@ -92,26 +131,128 @@ async function getStore() {
 }
 
 const thumbUrlCache = new Map<string, string>();
+/** 视频真实分辨率（抽帧后写入，瀑布流按此排） */
+const mediaSizeCache = new Map<string, { width: number; height: number }>();
 
 type QueueJob = {
   path: string;
+  kind?: string;
   resolve: (url: string) => void;
   reject: (err: unknown) => void;
 };
 
 const queue: QueueJob[] = [];
 let activeWorkers = 0;
+let activeVideoWorkers = 0;
+
+type VideoFrameResult = { dataUrl: string; width: number; height: number };
+
+/** 从视频抽一帧当封面，并带回真实宽高（瀑布流要用） */
+function captureVideoFrame(path: string): Promise<VideoFrameResult> {
+  return new Promise((resolve, reject) => {
+    const url = localFileUrl(path);
+    if (!url) {
+      reject(new Error("no origin"));
+      return;
+    }
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.crossOrigin = "anonymous";
+    let settled = false;
+    const done = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.removeAttribute("src");
+      video.load();
+      fn();
+    };
+    const timer = window.setTimeout(() => {
+      done(() => reject(new Error("video thumb timeout")));
+    }, 10000);
+
+    const snap = () => {
+      const vw = video.videoWidth || 0;
+      const vh = video.videoHeight || 0;
+      if (vw < 2 || vh < 2) {
+        done(() => reject(new Error("no frame")));
+        return;
+      }
+      // 缩略图最长边 480，保持真实比例
+      const scale = Math.min(1, 480 / Math.max(vw, vh));
+      const w = Math.max(2, Math.round(vw * scale));
+      const h = Math.max(2, Math.round(vh * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        done(() => reject(new Error("no canvas")));
+        return;
+      }
+      ctx.drawImage(video, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.84);
+      done(() => resolve({ dataUrl, width: vw, height: vh }));
+    };
+
+    video.addEventListener("error", () => {
+      done(() => reject(new Error("video load error")));
+    });
+    video.addEventListener("loadeddata", () => {
+      try {
+        const dur = Number.isFinite(video.duration) ? video.duration : 0;
+        const t = dur > 3 ? Math.min(1.5, dur * 0.1) : dur > 0.4 ? 0.2 : 0;
+        if (t < 0.05) {
+          snap();
+          return;
+        }
+        video.addEventListener("seeked", () => snap(), { once: true });
+        video.currentTime = t;
+      } catch (e) {
+        done(() => reject(e));
+      }
+    });
+    video.src = url;
+  });
+}
 
 function pumpQueue() {
   while (activeWorkers < THUMB_CONCURRENCY && queue.length > 0) {
-    const job = queue.shift()!;
+    // 视频抽帧限流：队列头是视频且视频槽满了 → 先找后面的图片任务
+    let jobIndex = 0;
+    while (jobIndex < queue.length) {
+      const cand = queue[jobIndex]!;
+      const isVid = isVideoPath(cand.path, cand.kind);
+      if (!isVid || activeVideoWorkers < VIDEO_THUMB_CONCURRENCY) break;
+      jobIndex += 1;
+    }
+    if (jobIndex >= queue.length) break;
+    const job = queue.splice(jobIndex, 1)[0]!;
+    const isVid = isVideoPath(job.path, job.kind);
     activeWorkers += 1;
+    if (isVid) activeVideoWorkers += 1;
     void (async () => {
       try {
         const cached = thumbUrlCache.get(job.path);
         if (cached) {
           job.resolve(cached);
           return;
+        }
+        if (isVid) {
+          try {
+            const frame = await captureVideoFrame(job.path);
+            thumbUrlCache.set(job.path, frame.dataUrl);
+            mediaSizeCache.set(job.path, {
+              width: frame.width,
+              height: frame.height,
+            });
+            job.resolve(frame.dataUrl);
+            return;
+          } catch {
+            /* fall through to backend placeholder */
+          }
         }
         const dataUrl = await invoke<string>("get_thumbnail", { path: job.path });
         if (!dataUrl.startsWith("data:image/")) throw new Error("invalid thumb");
@@ -121,19 +262,37 @@ function pumpQueue() {
         job.reject(e);
       } finally {
         activeWorkers -= 1;
+        if (isVid) activeVideoWorkers -= 1;
         pumpQueue();
       }
     })();
   }
 }
 
-function resolveThumbUrl(imagePath: string): Promise<string> {
+function resolveThumbUrl(imagePath: string, kind?: string): Promise<string> {
   const hit = thumbUrlCache.get(imagePath);
   if (hit) return Promise.resolve(hit);
   return new Promise<string>((resolve, reject) => {
-    queue.push({ path: imagePath, resolve, reject });
+    queue.push({ path: imagePath, kind, resolve, reject });
     pumpQueue();
   });
+}
+
+/** 全局只允许一个格子在悬停预览播，避免卡顿 */
+let activePreviewVideo: HTMLVideoElement | null = null;
+const PREVIEW_HOVER_DELAY_MS = 90;
+
+function stopActivePreview() {
+  if (!activePreviewVideo) return;
+  try {
+    activePreviewVideo.pause();
+    activePreviewVideo.removeAttribute("src");
+    activePreviewVideo.load();
+  } catch {
+    /* ignore */
+  }
+  activePreviewVideo = null;
+  window.dispatchEvent(new CustomEvent("flybox-stop-preview"));
 }
 
 const Tile = memo(function Tile({
@@ -143,6 +302,7 @@ const Tile = memo(function Tile({
   onOpen,
   onContextMenu,
   scrollRoot,
+  onMediaSize,
 }: {
   img: ImageEntry;
   index: number;
@@ -150,15 +310,30 @@ const Tile = memo(function Tile({
   onOpen: (index: number) => void;
   onContextMenu?: (e: React.MouseEvent, index: number) => void;
   scrollRoot: HTMLElement | null;
+  /** 视频抽到真实宽高后回调，瀑布流重排 */
+  onMediaSize?: (path: string, width: number, height: number) => void;
 }) {
   const ref = useRef<HTMLButtonElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [src, setSrc] = useState<string | null>(() => thumbUrlCache.get(img.path) ?? null);
   const [ready, setReady] = useState(() => thumbUrlCache.has(img.path));
   const [failed, setFailed] = useState(false);
+  /** 悬停时格子内静音循环预览 */
+  const [previewing, setPreviewing] = useState(false);
+  const video = isVideoEntry(img);
+  const cachedSize = mediaSizeCache.get(img.path);
+  const w = cachedSize?.width || img.width;
+  const h = cachedSize?.height || img.height;
 
-  // Reserve slot height up front (GitHub masonry pattern) so scroll doesn't thrash.
+  // 瀑布流：视频用真实比例；假 16:9 会让一排视频全长得一样、很难看
   const ar =
-    img.width > 0 && img.height > 0 ? img.width / img.height : layout === "grid" ? 1 : 0.75;
+    layout === "grid"
+      ? 1
+      : w > 0 && h > 0
+        ? w / h
+        : video
+          ? 16 / 9
+          : 0.75;
 
   useEffect(() => {
     const el = ref.current;
@@ -169,11 +344,13 @@ const Tile = memo(function Tile({
     const run = () => {
       if (started || cancelled) return;
       started = true;
-      void resolveThumbUrl(img.path)
+      void resolveThumbUrl(img.path, img.kind)
         .then((url) => {
           if (!cancelled) {
             setSrc(url);
             setFailed(false);
+            const sz = mediaSizeCache.get(img.path);
+            if (sz && onMediaSize) onMediaSize(img.path, sz.width, sz.height);
           }
         })
         .catch(() => {
@@ -207,13 +384,82 @@ const Tile = memo(function Tile({
       cancelled = true;
       io.disconnect();
     };
-  }, [img.path, scrollRoot]);
+  }, [img.path, img.kind, scrollRoot, onMediaSize]);
+
+  const hoverTimer = useRef<number | null>(null);
+
+  const startPreview = useCallback(() => {
+    if (!video) return;
+    const v = videoRef.current;
+    if (!v) return;
+    const fileUrl = localFileUrl(img.path);
+    if (!fileUrl) return;
+    if (activePreviewVideo && activePreviewVideo !== v) {
+      stopActivePreview();
+    }
+    if (v.getAttribute("src") !== fileUrl) {
+      v.src = fileUrl;
+    }
+    v.muted = true;
+    v.loop = true;
+    v.playsInline = true;
+    activePreviewVideo = v;
+    setPreviewing(true);
+    void v.play().catch(() => {
+      /* 自动播失败时仍显示封面 */
+    });
+  }, [video, img.path]);
+
+  const stopPreview = useCallback(() => {
+    if (hoverTimer.current != null) {
+      window.clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+    if (!video) return;
+    const v = videoRef.current;
+    if (v && activePreviewVideo === v) {
+      try {
+        v.pause();
+        v.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
+      activePreviewVideo = null;
+    }
+    setPreviewing(false);
+  }, [video]);
+
+  const schedulePreview = useCallback(() => {
+    if (!video) return;
+    if (hoverTimer.current != null) window.clearTimeout(hoverTimer.current);
+    // 轻微延迟：快速划过格子不启动解码，滚动更顺
+    hoverTimer.current = window.setTimeout(() => {
+      hoverTimer.current = null;
+      startPreview();
+    }, PREVIEW_HOVER_DELAY_MS);
+  }, [video, startPreview]);
+
+  useEffect(() => {
+    const onStop = () => setPreviewing(false);
+    window.addEventListener("flybox-stop-preview", onStop);
+    return () => {
+      window.removeEventListener("flybox-stop-preview", onStop);
+      if (hoverTimer.current != null) window.clearTimeout(hoverTimer.current);
+      if (videoRef.current && activePreviewVideo === videoRef.current) {
+        stopActivePreview();
+      }
+    };
+  }, []);
 
   return (
     <button
       ref={ref}
       type="button"
-      className={layout === "waterfall" ? "tile tile-wf" : "tile tile-grid"}
+      className={
+        (layout === "waterfall" ? "tile tile-wf" : "tile tile-grid") +
+        (video ? " tile-has-video" : "") +
+        (previewing ? " tile-previewing" : "")
+      }
       style={
         layout === "waterfall"
           ? ({ ["--ar" as string]: String(ar) } as React.CSSProperties)
@@ -221,7 +467,11 @@ const Tile = memo(function Tile({
       }
       onClick={() => onOpen(index)}
       onContextMenu={(e) => onContextMenu?.(e, index)}
-      title={img.name}
+      onMouseEnter={() => schedulePreview()}
+      onMouseLeave={() => stopPreview()}
+      onFocus={() => schedulePreview()}
+      onBlur={() => stopPreview()}
+      title={video ? `${img.name} · 悬停预览，点击全屏播` : img.name}
     >
       {!ready && !failed && <div className="tile-ph" aria-hidden />}
       {failed && !src && <div className="tile-ph fail">无法预览</div>}
@@ -232,7 +482,11 @@ const Tile = memo(function Tile({
           loading="lazy"
           decoding="async"
           draggable={false}
-          className={ready ? "on" : ""}
+          className={
+            (ready ? "on " : "") +
+            (video && layout === "waterfall" ? "tile-img-video " : "") +
+            (previewing ? "tile-img-dim" : "")
+          }
           onLoad={() => setReady(true)}
           onError={() => {
             setFailed(true);
@@ -241,83 +495,123 @@ const Tile = memo(function Tile({
           }}
         />
       )}
+      {video && (
+        <video
+          ref={videoRef}
+          className={previewing ? "tile-video-preview on" : "tile-video-preview"}
+          muted
+          loop
+          playsInline
+          preload="none"
+          // 不设 controls，格子里是预览
+        />
+      )}
+      {video && !previewing && ready && src && (
+        <span className="tile-video-badge" aria-label="video" />
+      )}
     </button>
   );
 });
 
 /**
  * JS multi-column waterfall (shortest-column packing).
- * Inspired by masonic / Pinterest: known aspect ratios + no CSS-column reflow jank.
+ * 对照 masonic / Pinterest：
+ * - 只在「列数变化」时 React 重排；拖窗口过程中列宽交给 CSS flex，避免每像素 setState
+ * - 高度用相对比例（宽抵消），最短列算法与像素宽无关
  */
+const WF_GAP = 12;
+const WF_TARGET_COL = 220;
+
+function waterfallColCount(width: number): number {
+  if (width <= 0) return 1;
+  return Math.max(1, Math.floor((width + WF_GAP) / (WF_TARGET_COL + WF_GAP)) || 1);
+}
+
 function WaterfallGallery({
   images,
   onOpen,
   onContextMenu,
   scrollRoot,
+  onMediaSize,
 }: {
   images: ImageEntry[];
   onOpen: (index: number) => void;
   onContextMenu?: (e: React.MouseEvent, index: number) => void;
   scrollRoot: HTMLElement | null;
+  onMediaSize?: (path: string, width: number, height: number) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState(0);
+  const [colCount, setColCount] = useState(1);
 
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0;
-      setWidth(w);
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
+      const next = waterfallColCount(el.clientWidth);
+      setColCount((prev) => (prev === next ? prev : next));
+    };
+    const ro = new ResizeObserver(() => {
+      // rAF 合并：一帧最多算一次列数，不在拖拽中 setTimeout 堆积
+      if (raf) return;
+      raf = requestAnimationFrame(apply);
     });
     ro.observe(el);
-    setWidth(el.clientWidth);
-    return () => ro.disconnect();
+    apply();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, []);
 
-  const gap = 12;
-  const targetCol = 220;
-  const colCount = Math.max(1, Math.floor((width + gap) / (targetCol + gap)) || 1);
-  const colWidth = width > 0 ? (width - gap * (colCount - 1)) / colCount : targetCol;
-
-  // Pack items into shortest column using estimated heights from aspect ratio.
-  const columns: { img: ImageEntry; index: number }[][] = Array.from(
-    { length: colCount },
-    () => [],
-  );
-  const colHeights = Array.from({ length: colCount }, () => 0);
-
-  if (width > 0) {
-    images.forEach((img, index) => {
+  // 仅 images / 列数变时重算列分配；拖宽不重算
+  const columns = useMemo(() => {
+    const cols: { img: ImageEntry; index: number }[][] = Array.from(
+      { length: colCount },
+      () => [],
+    );
+    const heights = Array.from({ length: colCount }, () => 0);
+    for (let index = 0; index < images.length; index++) {
+      const img = images[index];
       let minI = 0;
       for (let i = 1; i < colCount; i++) {
-        if (colHeights[i] < colHeights[minI]) minI = i;
+        if (heights[i] < heights[minI]) minI = i;
       }
-      const ar = img.width > 0 && img.height > 0 ? img.height / img.width : 1.25;
-      const estH = colWidth * ar;
-      columns[minI].push({ img, index });
-      colHeights[minI] += estH + gap;
-    });
-  }
+      const sz = mediaSizeCache.get(img.path);
+      const iw = sz?.width || img.width;
+      const ih = sz?.height || img.height;
+      // 相对高（与列像素宽无关）；视频未测前 16:9
+      const ar =
+        iw > 0 && ih > 0
+          ? ih / iw
+          : isVideoEntry(img)
+            ? 9 / 16
+            : 1.25;
+      cols[minI].push({ img, index });
+      heights[minI] += ar + 0.05;
+    }
+    return cols;
+  }, [images, colCount]);
 
   return (
     <div ref={wrapRef} className="waterfall-js">
-      {width > 0 &&
-        columns.map((col, ci) => (
-          <div key={ci} className="waterfall-col" style={{ width: colWidth }}>
-            {col.map(({ img, index }) => (
-              <Tile
-                key={img.path}
-                img={img}
-                index={index}
-                layout="waterfall"
-                onOpen={onOpen}
-                onContextMenu={onContextMenu}
-                scrollRoot={scrollRoot}
-              />
-            ))}
-          </div>
-        ))}
+      {columns.map((col, ci) => (
+        <div key={ci} className="waterfall-col">
+          {col.map(({ img, index }) => (
+            <Tile
+              key={img.path}
+              img={img}
+              index={index}
+              layout="waterfall"
+              onOpen={onOpen}
+              onContextMenu={onContextMenu}
+              scrollRoot={scrollRoot}
+              onMediaSize={onMediaSize}
+            />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -389,6 +683,12 @@ export default function App() {
   const [appModule, setAppModule] = useState<AppModule>("gallery");
   const [moduleChrome, setModuleChrome] = useState<ModuleChrome | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsAnchor, setSettingsAnchor] = useState<DOMRect | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [autostartOn, setAutostartOn] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  const logoBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const switchModule = useCallback((m: AppModule) => {
     setActiveIndex(null);
@@ -435,9 +735,76 @@ export default function App() {
     (on: boolean) => {
       deepScanRef.current = on;
       setDeepScan(on);
+      void (async () => {
+        try {
+          const store = await getStore();
+          await store.set(DEEP_DEFAULT_KEY, on);
+        } catch {
+          /* ignore */
+        }
+      })();
       if (vault) void loadImages(vault, on);
     },
     [vault, loadImages],
+  );
+
+  const persistAppSettings = useCallback(
+    async (next: AppSettings) => {
+      const prevDeep = deepScanRef.current;
+      setAppSettings(next);
+      deepScanRef.current = next.deepScanDefault;
+      setDeepScan(next.deepScanDefault);
+      try {
+        const store = await getStore();
+        await store.set(RESTORE_VAULT_KEY, next.restoreVault);
+        await store.set(DEEP_DEFAULT_KEY, next.deepScanDefault);
+        await store.set(START_MIN_KEY, next.startMinimized);
+      } catch {
+        /* ignore */
+      }
+      if (vault && prevDeep !== next.deepScanDefault) {
+        void loadImages(vault, next.deepScanDefault);
+      }
+    },
+    [vault, loadImages],
+  );
+
+  /** Logo：开则关、关则开；打开时再点顶栏其它区域也会关（见 SettingsPopover 捕获） */
+  const toggleSettings = useCallback(() => {
+    setSettingsOpen((open) => {
+      if (open) return false;
+      const el = logoBtnRef.current;
+      if (el) setSettingsAnchor(el.getBoundingClientRect());
+      return true;
+    });
+  }, []);
+
+  const onTopbarPointerDown = useCallback(
+    (e: ReactPointerEvent) => {
+      if (!settingsOpen) return;
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      // Logo 交给 toggle；弹窗在 portal 里不在顶栏
+      if (t.closest(".logo-btn") || t.closest(".settings-pop")) return;
+      setSettingsOpen(false);
+    },
+    [settingsOpen],
+  );
+
+  const onAutostartChange = useCallback(
+    async (on: boolean) => {
+      setAutostartBusy(true);
+      try {
+        await setAutostart(on);
+        setAutostartOn(on);
+        showToast(t("settingsSaved"));
+      } catch {
+        showToast(t("settingsAutostartFail"));
+      } finally {
+        setAutostartBusy(false);
+      }
+    },
+    [showToast, t],
   );
 
   const openVault = useCallback(
@@ -477,8 +844,35 @@ export default function App() {
     (async () => {
       try {
         const store = await getStore();
-        const saved = await store.get<string>(VAULT_KEY);
-        if (saved) await openVault(saved);
+        const restore = (await store.get<boolean>(RESTORE_VAULT_KEY)) ?? true;
+        const deepDef = (await store.get<boolean>(DEEP_DEFAULT_KEY)) ?? false;
+        const startMin = (await store.get<boolean>(START_MIN_KEY)) ?? false;
+        setAppSettings({
+          restoreVault: restore,
+          deepScanDefault: deepDef,
+          startMinimized: startMin,
+        });
+        deepScanRef.current = deepDef;
+        setDeepScan(deepDef);
+
+        try {
+          setAutostartOn(await readAutostart());
+        } catch {
+          /* ignore */
+        }
+
+        if (startMin) {
+          try {
+            await appWindow.minimize();
+          } catch {
+            /* ignore */
+          }
+        }
+
+        if (restore) {
+          const saved = await store.get<string>(VAULT_KEY);
+          if (saved) await openVault(saved);
+        }
       } catch {
         /* ignore */
       } finally {
@@ -493,10 +887,73 @@ export default function App() {
     dragRef.current = null;
   }, []);
 
-  const openAt = (index: number) => {
+  const openAt = useCallback((index: number) => {
     setActiveIndex(index);
     resetView();
-  };
+  }, [resetView]);
+
+  // 窗口缩放：停悬停预览 + 关过渡，避免拖边框时解码/动画抢主线程（masonic/桌面端常见做法）
+  useEffect(() => {
+    let endTimer: number | null = null;
+    const onResize = () => {
+      document.documentElement.classList.add("is-resizing");
+      stopActivePreview();
+      if (endTimer != null) window.clearTimeout(endTimer);
+      endTimer = window.setTimeout(() => {
+        endTimer = null;
+        document.documentElement.classList.remove("is-resizing");
+      }, 140);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      if (endTimer != null) window.clearTimeout(endTimer);
+      document.documentElement.classList.remove("is-resizing");
+    };
+  }, []);
+
+  /** 视频真实宽高：合并一批再 setState，避免每抽一帧就整表重排 */
+  const pendingSizes = useRef<Map<string, { width: number; height: number }>>(new Map());
+  const sizeFlushTimer = useRef<number | null>(null);
+  const onMediaSize = useCallback((path: string, width: number, height: number) => {
+    if (width < 2 || height < 2) return;
+    mediaSizeCache.set(path, { width, height });
+    pendingSizes.current.set(path, { width, height });
+    if (sizeFlushTimer.current != null) return;
+    sizeFlushTimer.current = window.setTimeout(() => {
+      sizeFlushTimer.current = null;
+      const batch = pendingSizes.current;
+      if (batch.size === 0) return;
+      pendingSizes.current = new Map();
+      setImages((prev) => {
+        let changed = false;
+        const next = prev.map((img) => {
+          const sz = batch.get(img.path);
+          if (!sz) return img;
+          if (img.width === sz.width && img.height === sz.height) return img;
+          changed = true;
+          return { ...img, width: sz.width, height: sz.height };
+        });
+        return changed ? next : prev;
+      });
+    }, 80);
+  }, []);
+
+  // 滚动时停掉悬停预览，释放解码压力
+  useEffect(() => {
+    if (!scrollRoot) return;
+    let ticking = false;
+    const onScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        stopActivePreview();
+      });
+    };
+    scrollRoot.addEventListener("scroll", onScroll, { passive: true });
+    return () => scrollRoot.removeEventListener("scroll", onScroll);
+  }, [scrollRoot]);
 
   const closeLightbox = useCallback(() => {
     setActiveIndex(null);
@@ -533,6 +990,16 @@ export default function App() {
   };
 
   const copyImage = async (entry: ImageEntry) => {
+    // 视频只复制路径；图片尽量贴剪贴板
+    if (isVideoEntry(entry)) {
+      try {
+        await writeText(entry.path);
+        showToast(t("copiedPath"));
+      } catch (e) {
+        showToast(`${t("copyFail")}：${e}`);
+      }
+      return;
+    }
     try {
       const url = localFileUrl(entry.path);
       if (!url) throw new Error("no origin");
@@ -691,16 +1158,40 @@ export default function App() {
 
   // 点缩略图放大 = 单图预览（灯箱）
   const lightboxOpen = activeIndex != null && images[activeIndex] != null;
-  const showViewer = lightboxOpen;
   const currentIndex = lightboxOpen ? activeIndex : null;
 
   useEffect(() => {
-    if (!showViewer) return;
+    if (!lightboxOpen || currentIndex == null) return;
+    const entry = images[currentIndex];
+    const videoMode = entry ? isVideoEntry(entry) : false;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         closeLightbox();
         return;
+      }
+      if (videoMode) {
+        const v = document.querySelector(
+          "video.viewer-video",
+        ) as HTMLVideoElement | null;
+        if (e.key === " " || e.code === "Space") {
+          e.preventDefault();
+          if (v) {
+            if (v.paused) void v.play();
+            else v.pause();
+          }
+          return;
+        }
+        if (e.key === "ArrowLeft" && (e.shiftKey || e.altKey)) {
+          e.preventDefault();
+          if (v) v.currentTime = Math.max(0, v.currentTime - 5);
+          return;
+        }
+        if (e.key === "ArrowRight" && (e.shiftKey || e.altKey)) {
+          e.preventDefault();
+          if (v) v.currentTime = Math.min(v.duration || 1e9, v.currentTime + 5);
+          return;
+        }
       }
       if (e.key === "ArrowLeft") {
         e.preventDefault();
@@ -708,27 +1199,27 @@ export default function App() {
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         goNext();
-      } else if (e.key === "+" || e.key === "=") {
+      } else if (!videoMode && (e.key === "+" || e.key === "=")) {
         e.preventDefault();
         zoomIn();
-      } else if (e.key === "-" || e.key === "_") {
+      } else if (!videoMode && (e.key === "-" || e.key === "_")) {
         e.preventDefault();
         zoomOut();
-      } else if (e.key === "0") {
+      } else if (!videoMode && e.key === "0") {
         e.preventDefault();
         zoomReset();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showViewer, closeLightbox, goPrev, goNext]);
+  }, [lightboxOpen, currentIndex, images, closeLightbox, goPrev, goNext]);
 
   const folderName = vault
     ? vault.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || vault
     : "";
 
   const viewing =
-    showViewer && currentIndex != null && images[currentIndex]
+    lightboxOpen && currentIndex != null && images[currentIndex]
       ? images[currentIndex]
       : null;
 
@@ -739,9 +1230,10 @@ export default function App() {
           className="topbar"
           data-tauri-drag-region
           onDoubleClick={() => void appWindow.toggleMaximize()}
+          onPointerDown={onTopbarPointerDown}
         >
           <div className="brand" data-tauri-drag-region>
-            <BrandLogo />
+            <BrandLogo onClick={toggleSettings} btnRef={logoBtnRef} />
           </div>
           <div className="topbar-right">
             <div className="actions">
@@ -796,15 +1288,19 @@ export default function App() {
       {appModule === "gallery" &&
         (viewing ? (
           <>
-            <button type="button" className="icon-btn" title={t("zoomOut")} onClick={zoomOut}>
-              <Minus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-            </button>
-            <button type="button" className="icon-btn zoom-pct" title={t("zoomReset")} onClick={zoomReset}>
-              {Math.round(zoom * 100)}%
-            </button>
-            <button type="button" className="icon-btn" title={t("zoomIn")} onClick={zoomIn}>
-              <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-            </button>
+            {!isVideoEntry(viewing) && (
+              <>
+                <button type="button" className="icon-btn" title={t("zoomOut")} onClick={zoomOut}>
+                  <Minus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
+                <button type="button" className="icon-btn zoom-pct" title={t("zoomReset")} onClick={zoomReset}>
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button type="button" className="icon-btn" title={t("zoomIn")} onClick={zoomIn}>
+                  <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="icon-btn"
@@ -902,6 +1398,7 @@ export default function App() {
         className="topbar"
         data-tauri-drag-region
         onDoubleClick={() => void appWindow.toggleMaximize()}
+        onPointerDown={onTopbarPointerDown}
       >
         <div className="brand" data-tauri-drag-region>
           {galleryViewerChrome && viewing ? (
@@ -915,8 +1412,8 @@ export default function App() {
                 <ArrowLeft size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
               </button>
               <span className="viewer-title" title={viewing.path} data-tauri-drag-region>
-                {viewing.name}
-                <span className="muted">
+                <span className="viewer-title-name">{viewing.name}</span>
+                <span className="viewer-title-meta muted">
                   {" "}
                   · {(currentIndex ?? 0) + 1}/{images.length}
                 </span>
@@ -924,7 +1421,7 @@ export default function App() {
             </>
           ) : (
             <>
-              <BrandLogo />
+              <BrandLogo onClick={toggleSettings} btnRef={logoBtnRef} />
               <span className="brand-sep" aria-hidden />
               {moduleNav}
               {appModule === "gallery" &&
@@ -1050,6 +1547,7 @@ export default function App() {
                 images={images}
                 onOpen={openAt}
                 onContextMenu={onTileContext}
+                onMediaSize={onMediaSize}
                 scrollRoot={scrollRoot}
               />
             ) : (
@@ -1073,7 +1571,7 @@ export default function App() {
 
       {appModule === "gallery" &&
         vault &&
-        showViewer &&
+        lightboxOpen &&
         currentIndex != null &&
         images[currentIndex] && (
         <div className="viewer overlay">
@@ -1089,6 +1587,7 @@ export default function App() {
               );
             }}
             onWheel={(e) => {
+              if (isVideoEntry(images[currentIndex])) return;
               e.preventDefault();
               if (e.deltaY < 0) zoomIn();
               else zoomOut();
@@ -1106,8 +1605,13 @@ export default function App() {
               ‹
             </button>
             <div
-              className="stage-inner"
+              className={
+                isVideoEntry(images[currentIndex])
+                  ? "stage-inner stage-inner-video"
+                  : "stage-inner"
+              }
               onPointerDown={(e) => {
+                if (isVideoEntry(images[currentIndex])) return;
                 if (zoom <= 1) return;
                 // 仅在点到图片本体时拖动
                 const img = (e.currentTarget as HTMLElement).querySelector("img");
@@ -1159,9 +1663,10 @@ export default function App() {
                 dragRef.current = null;
               }}
               onClick={(e) => {
-                // 点图片外空白关闭大图；放大后用未缩放尺寸+平移判断，避免 transform 盖住空白
+                // 视频：点控件不关；点空白关
                 if (dragRef.current?.moved) return;
                 if ((e.target as HTMLElement).closest(".nav")) return;
+                if ((e.target as HTMLElement).closest("video, .viewer-video-wrap")) return;
                 const img = (e.currentTarget as HTMLElement).querySelector("img");
                 if (img) {
                   const box = e.currentTarget.getBoundingClientRect();
@@ -1178,20 +1683,45 @@ export default function App() {
                 closeLightbox();
               }}
             >
-              <img
-                src={localFileUrl(images[currentIndex].path)}
-                alt={images[currentIndex].name}
-                style={{
-                  transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                }}
-                draggable={false}
-                onError={(e) => {
-                  const thumb = thumbUrlCache.get(images[currentIndex].path);
-                  if (thumb && e.currentTarget.src !== thumb) {
-                    e.currentTarget.src = thumb;
-                  }
-                }}
-              />
+              {isVideoEntry(images[currentIndex]) ? (
+                <div className="viewer-video-wrap">
+                  <video
+                    key={images[currentIndex].path}
+                    className="viewer-video"
+                    src={localFileUrl(images[currentIndex].path)}
+                    controls
+                    autoPlay
+                    muted
+                    playsInline
+                    preload="auto"
+                    onLoadedData={(e) => {
+                      // 系统常拦带声自动播；静音先播起来，用户可再开声音
+                      const v = e.currentTarget;
+                      void v.play().catch(() => undefined);
+                    }}
+                    onError={() => {
+                      showToast(
+                        "此视频无法播放（编码/格式不受支持，可试 MP4 H.264）",
+                      );
+                    }}
+                  />
+                </div>
+              ) : (
+                <img
+                  src={localFileUrl(images[currentIndex].path)}
+                  alt={images[currentIndex].name}
+                  style={{
+                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                  }}
+                  draggable={false}
+                  onError={(e) => {
+                    const thumb = thumbUrlCache.get(images[currentIndex].path);
+                    if (thumb && e.currentTarget.src !== thumb) {
+                      e.currentTarget.src = thumb;
+                    }
+                  }}
+                />
+              )}
             </div>
             <button
               type="button"
@@ -1208,6 +1738,16 @@ export default function App() {
         </div>
       )}
 
+      <SettingsPopover
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        anchor={settingsAnchor}
+        settings={appSettings}
+        onChange={(next) => void persistAppSettings(next)}
+        autostart={autostartOn}
+        onAutostartChange={onAutostartChange}
+        autostartBusy={autostartBusy}
+      />
       {toast && <div className="toast">{toast}</div>}
       <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
     </div>
