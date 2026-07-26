@@ -28,7 +28,8 @@
     "allow-vault-clear-destroyed",
     "opener:default",
     "dialog:default",
-    "clipboard-manager:default",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text",
     "store:default",
     "fs:default",
     {

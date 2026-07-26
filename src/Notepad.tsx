@@ -40,7 +40,6 @@ import {
   Scissors,
   Search,
   Smile,
-  TextSelect,
   Trash2,
   Type,
   Underline as UnderlineIcon,
@@ -78,9 +77,48 @@ export type Note = {
   cover?: string;
 };
 
-/** Notion 常用封面比例 1500×600 */
+/** Notion 常用封面比例 1500×600（2.5:1） */
 const COVER_W = 1500;
 const COVER_H = 600;
+const COVER_RATIO = COVER_W / COVER_H;
+
+type CoverCropState = {
+  src: string;
+  nw: number;
+  nh: number;
+  /** 裁切窗口左上角在原图像素坐标（所见即所得） */
+  sx: number;
+  sy: number;
+};
+
+/** 原图上 2.5:1 裁切窗口尺寸 + 可拖动范围 */
+function coverWindow(nw: number, nh: number) {
+  let sw: number;
+  let sh: number;
+  if (nw / nh > COVER_RATIO) {
+    // 图更宽：高度吃满，左右裁
+    sh = nh;
+    sw = nh * COVER_RATIO;
+  } else {
+    // 图更高/方：宽度吃满，上下裁
+    sw = nw;
+    sh = nw / COVER_RATIO;
+  }
+  return {
+    sw,
+    sh,
+    maxSx: Math.max(0, nw - sw),
+    maxSy: Math.max(0, nh - sh),
+  };
+}
+
+function clampCoverOrigin(nw: number, nh: number, sx: number, sy: number) {
+  const { maxSx, maxSy } = coverWindow(nw, nh);
+  return {
+    sx: Math.min(maxSx, Math.max(0, sx)),
+    sy: Math.min(maxSy, Math.max(0, sy)),
+  };
+}
 
 const TEXT_COLORS = [
   { id: "default", color: "", label: "默" },
@@ -166,31 +204,18 @@ function bytesToDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
   return readBlobAsDataUrl(blob);
 }
 
-/** 居中裁切为 Notion 封面比例，输出 JPEG data URL */
-function cropCoverToNotion(src: string): Promise<string> {
+/** 按原图像素窗口裁切为 1500×600 JPEG（与预览框所见一致） */
+function cropCoverFromOrigin(
+  src: string,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new window.Image();
     img.onload = () => {
       try {
-        const iw = img.naturalWidth;
-        const ih = img.naturalHeight;
-        if (iw < 1 || ih < 1) {
-          reject(new Error("bad image"));
-          return;
-        }
-        const targetRatio = COVER_W / COVER_H;
-        const srcRatio = iw / ih;
-        let sx = 0;
-        let sy = 0;
-        let sw = iw;
-        let sh = ih;
-        if (srcRatio > targetRatio) {
-          sw = ih * targetRatio;
-          sx = (iw - sw) / 2;
-        } else {
-          sh = iw / targetRatio;
-          sy = (ih - sh) / 2;
-        }
         const canvas = document.createElement("canvas");
         canvas.width = COVER_W;
         canvas.height = COVER_H;
@@ -204,6 +229,21 @@ function cropCoverToNotion(src: string): Promise<string> {
       } catch (e) {
         reject(e);
       }
+    };
+    img.onerror = () => reject(new Error("load fail"));
+    img.src = src;
+  });
+}
+
+function loadImageSize(src: string): Promise<{ nw: number; nh: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => {
+      if (img.naturalWidth < 1 || img.naturalHeight < 1) {
+        reject(new Error("bad image"));
+        return;
+      }
+      resolve({ nw: img.naturalWidth, nh: img.naturalHeight });
     };
     img.onerror = () => reject(new Error("load fail"));
     img.src = src;
@@ -334,12 +374,24 @@ export default function Notepad({
   const [hexDraft, setHexDraft] = useState("#e07070");
   const [hsv, setHsv] = useState<Hsv>(() => hexToHsv("#e07070"));
   const [hexPopPos, setHexPopPos] = useState({ left: 0, top: 0 });
+  /** 封面裁切：用户拖动画中区域 */
+  const [coverCrop, setCoverCrop] = useState<CoverCropState | null>(null);
+  const coverFrameRef = useRef<HTMLDivElement | null>(null);
+  const coverDrag = useRef<{
+    id: number;
+    x0: number;
+    y0: number;
+    sx0: number;
+    sy0: number;
+  } | null>(null);
   const [sideOpen, setSideOpen] = useState(true);
   const saveTimer = useRef<number | null>(null);
   const dirtyListRef = useRef<Note[] | null>(null);
   const notesRef = useRef<Note[]>([]);
   const titleRef = useRef<HTMLInputElement | null>(null);
-  const emojiWrapRef = useRef<HTMLDivElement | null>(null);
+  const emojiBtnRef = useRef<HTMLButtonElement | null>(null);
+  const emojiPanelRef = useRef<HTMLDivElement | null>(null);
+  const [emojiPos, setEmojiPos] = useState({ left: 0, top: 0 });
   const hexPickRef = useRef<HTMLDivElement | null>(null);
   const hexTextBtnRef = useRef<HTMLButtonElement | null>(null);
   const hexHlBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -525,14 +577,56 @@ export default function Notepad({
     };
   }, []);
 
+  useLayoutEffect(() => {
+    if (!emojiOpen) return;
+    const btn = emojiBtnRef.current;
+    if (!btn) return;
+    const place = () => {
+      const r = btn.getBoundingClientRect();
+      const popW = 288;
+      const popH = 220;
+      let left = r.left + r.width / 2 - popW / 2;
+      let top = r.bottom + 8;
+      const pad = 8;
+      if (left < pad) left = pad;
+      if (left + popW > window.innerWidth - pad) {
+        left = window.innerWidth - pad - popW;
+      }
+      if (top + popH > window.innerHeight - pad) {
+        top = Math.max(pad, r.top - popH - 8);
+      }
+      setEmojiPos({ left, top });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [emojiOpen]);
+
   useEffect(() => {
     if (!emojiOpen) return;
     const onDown = (e: MouseEvent) => {
-      const wrap = emojiWrapRef.current;
-      if (wrap && !wrap.contains(e.target as Node)) setEmojiOpen(false);
+      const panel = emojiPanelRef.current;
+      const btn = emojiBtnRef.current;
+      const t = e.target as Node;
+      if (panel?.contains(t) || btn?.contains(t)) return;
+      setEmojiOpen(false);
     };
-    window.addEventListener("mousedown", onDown, true);
-    return () => window.removeEventListener("mousedown", onDown, true);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setEmojiOpen(false);
+    };
+    const id = window.setTimeout(() => {
+      window.addEventListener("mousedown", onDown, true);
+      window.addEventListener("keydown", onKey, true);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
   }, [emojiOpen]);
 
   const setColorFromHsv = (next: Hsv) => {
@@ -790,7 +884,7 @@ export default function Notepad({
     }
   };
 
-  /** 上传 / 更换封面：Notion 比例居中裁切 */
+  /** 上传 / 更换封面：选图后进入裁切框，用户拖动选择区域 */
   const setCoverFromPicker = async () => {
     try {
       const selected = await openDialog({
@@ -806,8 +900,34 @@ export default function Notepad({
       if (!selected || typeof selected !== "string") return;
       const bytes = await readFile(selected);
       const raw = await bytesToDataUrl(bytes, mimeFromPath(selected));
-      const cover = await cropCoverToNotion(raw);
+      const { nw, nh } = await loadImageSize(raw);
+      const { maxSx, maxSy } = coverWindow(nw, nh);
+      // 默认居中
+      setCoverCrop({
+        src: raw,
+        nw,
+        nh,
+        sx: maxSx / 2,
+        sy: maxSy / 2,
+      });
+    } catch {
+      window.alert(t("addImageFail"));
+    }
+  };
+
+  const confirmCoverCrop = async () => {
+    if (!coverCrop) return;
+    try {
+      const { sw, sh } = coverWindow(coverCrop.nw, coverCrop.nh);
+      const { sx, sy } = clampCoverOrigin(
+        coverCrop.nw,
+        coverCrop.nh,
+        coverCrop.sx,
+        coverCrop.sy,
+      );
+      const cover = await cropCoverFromOrigin(coverCrop.src, sx, sy, sw, sh);
       updateActive({ cover });
+      setCoverCrop(null);
     } catch {
       window.alert(t("addImageFail"));
     }
@@ -1169,15 +1289,6 @@ export default function Notepad({
                 <button
                   type="button"
                   className="notepad-tool icon-only"
-                  title={t("selectAll")}
-                  onMouseDown={keepSel}
-                  onClick={() => editor.chain().focus().selectAll().run()}
-                >
-                  <TextSelect size={15} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-                <button
-                  type="button"
-                  className="notepad-tool icon-only"
                   title={t("insertDateTime")}
                   onMouseDown={keepSel}
                   onClick={insertDateTime}
@@ -1206,39 +1317,18 @@ export default function Notepad({
                 >
                   <PanelTop size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
-                <div className="notepad-emoji-wrap" ref={emojiWrapRef}>
-                  <button
-                    type="button"
-                    className={
-                      emojiOpen ? "notepad-tool icon-only on" : "notepad-tool icon-only"
-                    }
-                    title={t("insertEmoji")}
-                    onMouseDown={keepSel}
-                    onClick={() => setEmojiOpen((v) => !v)}
-                  >
-                    <Smile size={15} strokeWidth={1.75} absoluteStrokeWidth />
-                  </button>
-                  {emojiOpen ? (
-                    <div
-                      className="notepad-emoji-panel"
-                      role="listbox"
-                      aria-label={t("insertEmoji")}
-                    >
-                      {EMOJIS.map((em) => (
-                        <button
-                          key={em}
-                          type="button"
-                          className="notepad-emoji-btn"
-                          title={em}
-                          onMouseDown={keepSel}
-                          onClick={() => insertEmoji(em)}
-                        >
-                          {em}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
+                <button
+                  ref={emojiBtnRef}
+                  type="button"
+                  className={
+                    emojiOpen ? "notepad-tool icon-only on" : "notepad-tool icon-only"
+                  }
+                  title={t("insertEmoji")}
+                  onMouseDown={keepSel}
+                  onClick={() => setEmojiOpen((v) => !v)}
+                >
+                  <Smile size={15} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
                 <span className="notepad-tool-sep" />
                 {FONT_SIZES.map((fs) => (
                   <button
@@ -1344,6 +1434,135 @@ export default function Notepad({
       </div>
       <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
       {hexPop}
+      {emojiOpen
+        ? createPortal(
+            <div
+              ref={emojiPanelRef}
+              className="notepad-emoji-panel"
+              role="listbox"
+              aria-label={t("insertEmoji")}
+              style={{ left: emojiPos.left, top: emojiPos.top }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div className="notepad-emoji-panel-title">{t("insertEmoji")}</div>
+              <div className="notepad-emoji-grid">
+                {EMOJIS.map((em) => (
+                  <button
+                    key={em}
+                    type="button"
+                    className="notepad-emoji-btn"
+                    title={em}
+                    onMouseDown={keepSel}
+                    onClick={() => insertEmoji(em)}
+                  >
+                    {em}
+                  </button>
+                ))}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {coverCrop
+        ? createPortal(
+            <div
+              className="cover-crop-mask"
+              role="dialog"
+              aria-label={t("coverCropTitle")}
+              onMouseDown={(e) => {
+                if (e.target === e.currentTarget) setCoverCrop(null);
+              }}
+            >
+              <div className="cover-crop-panel">
+                <div className="cover-crop-title">{t("coverCropTitle")}</div>
+                <p className="cover-crop-hint">{t("coverCropHint")}</p>
+                <div
+                  ref={coverFrameRef}
+                  className="cover-crop-frame"
+                  onPointerDown={(e) => {
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    coverDrag.current = {
+                      id: e.pointerId,
+                      x0: e.clientX,
+                      y0: e.clientY,
+                      sx0: coverCrop.sx,
+                      sy0: coverCrop.sy,
+                    };
+                  }}
+                  onPointerMove={(e) => {
+                    const d = coverDrag.current;
+                    if (!d || d.id !== e.pointerId) return;
+                    const frame = coverFrameRef.current;
+                    if (!frame || frame.clientWidth <= 0) return;
+                    const { sw } = coverWindow(coverCrop.nw, coverCrop.nh);
+                    const scale = frame.clientWidth / sw;
+                    // 手指右移 → 图右移 → 裁切窗口在原图上左移
+                    const next = clampCoverOrigin(
+                      coverCrop.nw,
+                      coverCrop.nh,
+                      d.sx0 - (e.clientX - d.x0) / scale,
+                      d.sy0 - (e.clientY - d.y0) / scale,
+                    );
+                    setCoverCrop((c) =>
+                      c ? { ...c, sx: next.sx, sy: next.sy } : c,
+                    );
+                  }}
+                  onPointerUp={(e) => {
+                    if (coverDrag.current?.id === e.pointerId) {
+                      coverDrag.current = null;
+                    }
+                  }}
+                  onPointerCancel={() => {
+                    coverDrag.current = null;
+                  }}
+                >
+                  {(() => {
+                    const { sw, sh } = coverWindow(coverCrop.nw, coverCrop.nh);
+                    const { sx, sy } = clampCoverOrigin(
+                      coverCrop.nw,
+                      coverCrop.nh,
+                      coverCrop.sx,
+                      coverCrop.sy,
+                    );
+                    // 百分比相对裁切框：窗口 sw×sh 刚好铺满框 → 所见即所得
+                    return (
+                      <img
+                        src={coverCrop.src}
+                        alt=""
+                        draggable={false}
+                        className="cover-crop-img"
+                        style={{
+                          width: `${(coverCrop.nw / sw) * 100}%`,
+                          height: `${(coverCrop.nh / sh) * 100}%`,
+                          left: `${(-sx / sw) * 100}%`,
+                          top: `${(-sy / sh) * 100}%`,
+                        }}
+                      />
+                    );
+                  })()}
+                  <div className="cover-crop-shade" aria-hidden />
+                </div>
+                <div className="cover-crop-actions">
+                  <button
+                    type="button"
+                    className="cover-crop-btn ghost"
+                    onClick={() => setCoverCrop(null)}
+                  >
+                    {t("coverCropCancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="cover-crop-btn primary"
+                    onClick={() => void confirmCoverCrop()}
+                  >
+                    {t("coverCropOk")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

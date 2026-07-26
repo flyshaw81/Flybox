@@ -18,6 +18,7 @@ import {
   Plus,
   Skull,
   Trash2,
+  Mail,
   User,
   X,
 } from "lucide-react";
@@ -33,14 +34,21 @@ type ModuleChrome = {
 const ICO = 16;
 
 /** 账号类：用户名 + 密码 */
-export type AccountLikeType = "account" | "game" | "douyin" | "x" | "google" | "apple";
+export type AccountLikeType =
+  | "account"
+  | "game"
+  | "douyin"
+  | "x"
+  | "google"
+  | "apple"
+  | "email";
 export type EntryType = "api" | "bank" | AccountLikeType | "note";
 
 export type VaultEntry = {
   id: string;
   type: EntryType;
   title: string;
-  /** String values, or for API: `keys` may be string[]. */
+  /** String values；API：`urls` / `keys` 可为 string[]。 */
   fields: Record<string, unknown>;
   note: string;
   updatedAt: number;
@@ -52,6 +60,8 @@ type VaultStatus = {
   hint2: string;
   failCount: number;
   entryCount: number;
+  /** 冷却截止 Unix 毫秒；0 表示可试 */
+  lockUntilMs?: number;
 };
 
 type TabFilter = "all" | EntryType;
@@ -67,6 +77,7 @@ const TYPE_LABEL: Record<EntryType, string> = {
   x: "X 账号",
   google: "谷歌账号",
   apple: "Apple ID",
+  email: "邮箱",
   note: "自由文本",
 };
 
@@ -79,6 +90,7 @@ const ALL_TYPES: EntryType[] = [
   "x",
   "google",
   "apple",
+  "email",
   "note",
 ];
 
@@ -89,7 +101,8 @@ function isAccountLike(t: EntryType): t is AccountLikeType {
     t === "douyin" ||
     t === "x" ||
     t === "google" ||
-    t === "apple"
+    t === "apple" ||
+    t === "email"
   );
 }
 
@@ -113,9 +126,26 @@ function fieldsForType(type: EntryType, src?: Record<string, unknown>): Record<s
   const images = getImages(f);
   let base: Record<string, unknown> = {};
   if (type === "api") {
-    base = { url: fieldStr(f, "url"), keys: getApiKeys(f) };
+    base = { urls: getApiUrls(f), keys: getApiKeys(f) };
   } else if (type === "bank") {
-    base = { cardNumber: fieldStr(f, "cardNumber") };
+    base = {
+      holderName: fieldStr(f, "holderName"),
+      cardNumber: fieldStr(f, "cardNumber"),
+      bankName: fieldStr(f, "bankName"),
+    };
+  } else if (type === "douyin") {
+    base = {
+      username: fieldStr(f, "username"),
+      douyinId: fieldStr(f, "douyinId"),
+      phone: fieldStr(f, "phone"),
+      password: fieldStr(f, "password"),
+    };
+  } else if (type === "apple") {
+    base = {
+      username: fieldStr(f, "username"),
+      password: fieldStr(f, "password"),
+      region: fieldStr(f, "region"),
+    };
   } else if (isAccountLike(type)) {
     base = {
       username: fieldStr(f, "username"),
@@ -128,8 +158,10 @@ function fieldsForType(type: EntryType, src?: Record<string, unknown>): Record<s
 }
 
 function emptyFields(type: EntryType): Record<string, unknown> {
-  if (type === "api") return { url: "", keys: [""] };
-  if (type === "bank") return { cardNumber: "" };
+  if (type === "api") return { urls: [""], keys: [""] };
+  if (type === "bank") return { holderName: "", cardNumber: "", bankName: "" };
+  if (type === "douyin") return { username: "", douyinId: "", phone: "", password: "" };
+  if (type === "apple") return { username: "", password: "", region: "" };
   if (isAccountLike(type)) return { username: "", password: "" };
   if (type === "note") return { body: "" };
   return {};
@@ -169,10 +201,14 @@ function fieldStr(fields: Record<string, unknown> | undefined, key: string): str
   return "";
 }
 
-/** API 可多 KEY；兼容旧数据 fields.key 单字符串。 */
-function getApiKeys(fields: Record<string, unknown> | undefined): string[] {
+/** 读 string[] 字段；兼容旧单字符串 / JSON 数组字符串。 */
+function getStringList(
+  fields: Record<string, unknown> | undefined,
+  multiKey: string,
+  singleKey: string,
+): string[] {
   if (!fields) return [""];
-  const multi = fields.keys;
+  const multi = fields[multiKey];
   if (Array.isArray(multi)) {
     const list = multi.map((x) => (x == null ? "" : String(x)));
     return list.length > 0 ? list : [""];
@@ -188,9 +224,20 @@ function getApiKeys(fields: Record<string, unknown> | undefined): string[] {
       /* fall through */
     }
   }
-  const single = fieldStr(fields, "key");
+  if (typeof multi === "string" && multi.trim()) return [multi];
+  const single = fieldStr(fields, singleKey);
   if (single) return [single];
   return [""];
+}
+
+/** API 可多 KEY；兼容旧数据 fields.key 单字符串。 */
+function getApiKeys(fields: Record<string, unknown> | undefined): string[] {
+  return getStringList(fields, "keys", "key");
+}
+
+/** API 可多 URL；兼容旧数据 fields.url 单字符串。 */
+function getApiUrls(fields: Record<string, unknown> | undefined): string[] {
+  return getStringList(fields, "urls", "url");
 }
 
 function normalizeEntry(raw: VaultEntry): VaultEntry {
@@ -206,25 +253,42 @@ function normalizeEntry(raw: VaultEntry): VaultEntry {
   };
 }
 
+/** 列表/卡片摘要：只显示掩码，不露明文 */
 function previewLine(e: VaultEntry): string {
   if (e.type === "api") {
-    const url = fieldStr(e.fields, "url");
+    const urls = getApiUrls(e.fields).filter((u) => u.trim());
     const keys = getApiKeys(e.fields).filter((k) => k.trim());
-    if (url && keys.length) return keys.length > 1 ? `URL + ${keys.length} 个 KEY` : "URL + KEY";
-    if (url) return url;
-    if (keys.length > 1) return `${keys.length} 个 KEY`;
-    if (keys.length === 1) return maskSecret(keys[0]);
+    const urlPart =
+      urls.length > 1 ? `${urls.length} 个 URL` : urls.length === 1 ? "URL" : "";
+    const keyPart =
+      keys.length > 1 ? `${keys.length} 个 KEY` : keys.length === 1 ? "KEY" : "";
+    if (urlPart && keyPart) return `${urlPart} + ${keyPart}`;
+    if (urlPart) return `${urlPart} · ••••••••`;
+    if (keyPart) return keyPart === "KEY" ? "••••••••" : keyPart;
     return "API 密钥";
   }
   if (e.type === "bank") {
-    return maskCard(fieldStr(e.fields, "cardNumber")) || "银行卡";
+    const has =
+      fieldStr(e.fields, "holderName") ||
+      fieldStr(e.fields, "cardNumber") ||
+      fieldStr(e.fields, "bankName");
+    return has ? "••••••••" : "银行卡";
+  }
+  if (e.type === "douyin") {
+    const has =
+      fieldStr(e.fields, "username") ||
+      fieldStr(e.fields, "douyinId") ||
+      fieldStr(e.fields, "phone") ||
+      fieldStr(e.fields, "password");
+    return has ? "••••••••" : TYPE_LABEL.douyin;
   }
   if (isAccountLike(e.type)) {
-    return fieldStr(e.fields, "username") || TYPE_LABEL[e.type];
+    const has = fieldStr(e.fields, "username") || fieldStr(e.fields, "password");
+    return has ? "••••••••" : TYPE_LABEL[e.type];
   }
   if (e.type === "note") {
     const body = fieldStr(e.fields, "body");
-    return body ? (body.length > 28 ? body.slice(0, 28) + "…" : body) : "自由文本";
+    return body ? "••••••••" : "自由文本";
   }
   return "";
 }
@@ -233,24 +297,13 @@ function listMeta(e: VaultEntry): string {
   return `${TYPE_LABEL[e.type] ?? ""} · ${previewLine(e)}`;
 }
 
-function maskSecret(s: string): string {
-  if (!s) return "";
-  if (s.length <= 8) return "••••••••";
-  return s.slice(0, 6) + "••••••••";
-}
-
-function maskCard(s: string): string {
-  const d = s.replace(/\s+/g, "");
-  if (d.length < 4) return d ? "****" : "";
-  return `**** ${d.slice(-4)}`;
-}
-
 function TypeIcon({ type }: { type: EntryType }) {
   const p = { size: ICO, strokeWidth: 1.75 as const, absoluteStrokeWidth: true };
   if (type === "api") return <Key {...p} />;
   if (type === "bank") return <CreditCard {...p} />;
   if (type === "game") return <Gamepad2 {...p} />;
   if (type === "douyin" || type === "x") return <AtSign {...p} />;
+  if (type === "email") return <Mail {...p} />;
   if (type === "google" || type === "apple" || type === "account") return <User {...p} />;
   if (type === "note") return <FileText {...p} />;
   return <User {...p} />;
@@ -330,6 +383,7 @@ export default function Passbox({
             x: "type_x",
             google: "type_google",
             apple: "type_apple",
+            email: "type_email",
             note: "type_note",
           } as Record<EntryType, string>
         )[k],
@@ -356,6 +410,7 @@ export default function Passbox({
   // unlock
   const [unlockPw, setUnlockPw] = useState("");
   const [showHints, setShowHints] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   // list
   const [tab, setTab] = useState<TabFilter>("all");
@@ -367,6 +422,15 @@ export default function Passbox({
   useEffect(() => {
     tabRef.current = tab;
   }, [tab]);
+
+  // 冷却倒计时：解锁页且仍在锁定中时每秒刷新
+  useEffect(() => {
+    if (screen !== "unlock") return;
+    const until = status?.lockUntilMs ?? 0;
+    if (until <= Date.now()) return;
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [screen, status?.lockUntilMs]);
 
   // edit
   const [draft, setDraft] = useState<VaultEntry>(emptyDraft());
@@ -424,35 +488,62 @@ export default function Passbox({
     try {
       await writeText(text);
       showToast(label);
-    } catch (e) {
-      showToast(`复制失败：${e}`);
+    } catch (e1) {
+      // 插件失败时退回浏览器剪贴板
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          showToast(label);
+          return;
+        }
+      } catch {
+        /* fall through */
+      }
+      showToast(`复制失败：${e1}`);
     }
   };
 
-  const copyEntry = async (e: VaultEntry) => {
+  /** 列表/卡片上的复制：整条内容一起拷，方便粘贴 */
+  const formatEntryAll = (e: VaultEntry): string => {
+    const lines: string[] = [];
+    const push = (label: string, value: string) => {
+      const v = value.trim();
+      if (v) lines.push(`${label}：${v}`);
+    };
+    if (e.title.trim()) push("名称", e.title);
     if (e.type === "api") {
+      const urls = getApiUrls(e.fields).filter((u) => u.trim());
       const keys = getApiKeys(e.fields).filter((k) => k.trim());
-      const url = fieldStr(e.fields, "url");
-      if (keys.length === 1) {
-        await copyText(keys[0], "已复制 KEY");
-        return;
-      }
-      if (keys.length > 1) {
-        await copyText(keys.join("\n"), `已复制 ${keys.length} 个 KEY`);
-        return;
-      }
-      await copyText(url, "已复制 URL");
-      return;
+      urls.forEach((u, i) => push(urls.length > 1 ? `URL ${i + 1}` : "URL", u));
+      keys.forEach((k, i) => push(keys.length > 1 ? `KEY ${i + 1}` : "KEY", k));
+    } else if (e.type === "bank") {
+      push("开户名", fieldStr(e.fields, "holderName"));
+      push("卡号", fieldStr(e.fields, "cardNumber"));
+      push("银行", fieldStr(e.fields, "bankName"));
+    } else if (e.type === "douyin") {
+      push("用户名", fieldStr(e.fields, "username"));
+      push("抖音号", fieldStr(e.fields, "douyinId"));
+      push("手机号", fieldStr(e.fields, "phone"));
+      push("密码", fieldStr(e.fields, "password"));
+    } else if (e.type === "apple") {
+      push("Apple ID", fieldStr(e.fields, "username"));
+      push("密码", fieldStr(e.fields, "password"));
+      push("地区", fieldStr(e.fields, "region"));
+    } else if (e.type === "email") {
+      push("邮箱", fieldStr(e.fields, "username"));
+      push("密码", fieldStr(e.fields, "password"));
+    } else if (isAccountLike(e.type)) {
+      push("账号", fieldStr(e.fields, "username"));
+      push("密码", fieldStr(e.fields, "password"));
+    } else if (e.type === "note") {
+      push("内容", fieldStr(e.fields, "body"));
     }
-    if (e.type === "bank") {
-      await copyText(fieldStr(e.fields, "cardNumber"), "已复制卡号");
-      return;
-    }
-    if (isAccountLike(e.type)) {
-      await copyText(fieldStr(e.fields, "password") || fieldStr(e.fields, "username"), "已复制");
-      return;
-    }
-    await copyText(fieldStr(e.fields, "body") || e.note, "已复制");
+    if ((e.note ?? "").trim()) push("备注", e.note);
+    return lines.join("\n");
+  };
+
+  const copyEntry = async (e: VaultEntry) => {
+    await copyText(formatEntryAll(e), "已复制全部");
   };
 
   const onSetup = async () => {
@@ -606,6 +697,28 @@ export default function Passbox({
     });
   };
 
+  const setApiUrlAt = (index: number, value: string) => {
+    setDraft((d) => {
+      const urls = [...getApiUrls(d.fields)];
+      urls[index] = value;
+      return { ...d, fields: { ...d.fields, urls } };
+    });
+  };
+
+  const addApiUrl = () => {
+    setDraft((d) => {
+      const urls = [...getApiUrls(d.fields), ""];
+      return { ...d, fields: { ...d.fields, urls } };
+    });
+  };
+
+  const removeApiUrl = (index: number) => {
+    setDraft((d) => {
+      const urls = getApiUrls(d.fields).filter((_, i) => i !== index);
+      return { ...d, fields: { ...d.fields, urls: urls.length > 0 ? urls : [""] } };
+    });
+  };
+
   const onSave = async () => {
     setError(null);
     try {
@@ -616,9 +729,29 @@ export default function Passbox({
         const keys = getApiKeys(draft.fields)
           .map((k) => k.trim())
           .filter(Boolean);
-        fields = { url: fieldStr(draft.fields, "url").trim(), keys };
+        const urls = getApiUrls(draft.fields)
+          .map((u) => u.trim())
+          .filter(Boolean);
+        fields = { urls, keys };
       } else if (draft.type === "bank") {
-        fields = { cardNumber: fieldStr(draft.fields, "cardNumber").trim() };
+        fields = {
+          holderName: fieldStr(draft.fields, "holderName").trim(),
+          cardNumber: fieldStr(draft.fields, "cardNumber").trim(),
+          bankName: fieldStr(draft.fields, "bankName").trim(),
+        };
+      } else if (draft.type === "douyin") {
+        fields = {
+          username: fieldStr(draft.fields, "username").trim(),
+          douyinId: fieldStr(draft.fields, "douyinId").trim(),
+          phone: fieldStr(draft.fields, "phone").trim(),
+          password: fieldStr(draft.fields, "password"),
+        };
+      } else if (draft.type === "apple") {
+        fields = {
+          username: fieldStr(draft.fields, "username").trim(),
+          password: fieldStr(draft.fields, "password"),
+          region: fieldStr(draft.fields, "region").trim(),
+        };
       } else if (isAccountLike(draft.type)) {
         fields = {
           username: fieldStr(draft.fields, "username").trim(),
@@ -632,10 +765,28 @@ export default function Passbox({
         const { images: _drop, image: _drop2, ...rest } = fields as Record<string, unknown>;
         fields = rest;
       }
+      // 部分分类不填「名称」：用账号字段当列表标题
+      const title =
+        draft.type === "douyin"
+          ? fieldStr(fields, "username") ||
+            fieldStr(fields, "douyinId") ||
+            fieldStr(fields, "phone") ||
+            "抖音账号"
+          : draft.type === "apple"
+            ? fieldStr(fields, "username") ||
+              fieldStr(fields, "region") ||
+              "Apple ID"
+            : draft.type === "google"
+              ? fieldStr(fields, "username") || "谷歌账号"
+              : draft.type === "bank"
+                ? fieldStr(fields, "holderName") ||
+                  fieldStr(fields, "bankName") ||
+                  "银行卡"
+                : draft.title.trim();
       const payload = {
         id: draft.id,
         type: draft.type,
-        title: draft.title.trim(),
+        title,
         fields,
         note: (draft.note ?? "").trim(),
         updatedAt: draft.updatedAt || 0,
@@ -764,7 +915,14 @@ export default function Passbox({
       /* ignore */
     }
     setScreen("setup");
-    setStatus({ state: "none", hint1: "", hint2: "", failCount: 0, entryCount: 0 });
+    setStatus({
+      state: "none",
+      hint1: "",
+      hint2: "",
+      failCount: 0,
+      entryCount: 0,
+      lockUntilMs: 0,
+    });
   };
 
   /** 嵌入顶栏：锁图标已标「密码箱」，这里只补场景，避免「密码箱·列表」叠字 */
@@ -831,10 +989,13 @@ export default function Passbox({
           >
             <ArrowLeft size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
           </button>
+          <button type="button" className="icon-btn" title={t("newEntry")} onClick={openNew}>
+            <Plus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+          </button>
           {draft.id ? (
             <button
               type="button"
-              className="icon-btn danger"
+              className="icon-btn"
               title={t("delete")}
               onClick={() => void onDeleteEntry()}
             >
@@ -914,7 +1075,7 @@ export default function Passbox({
               <input type="text" value={hint2} onChange={(e) => setHint2(e.target.value)} placeholder="例如：小学班主任姓氏" />
             </label>
           </div>
-          <p className="passbox-warn">连续输错 50 次密码 → 箱内全部内容自动永久销毁</p>
+          <p className="passbox-warn">{t("wipeRule")}</p>
           <button type="button" className="passbox-primary" onClick={() => void onSetup()}>
             {t("createAndLock")}
           </button>
@@ -926,6 +1087,27 @@ export default function Passbox({
           <Lock size={32} strokeWidth={1.5} color="#666" absoluteStrokeWidth />
           <h1 className="passbox-h1">{t("unlockTitle")}</h1>
           <div className="passbox-form passbox-unlock-form">
+            {(() => {
+              const until = status?.lockUntilMs ?? 0;
+              const remMs = Math.max(0, until - nowTick);
+              if (remMs <= 0) return null;
+              const remSec = Math.ceil(remMs / 1000);
+              const h = Math.floor(remSec / 3600);
+              const m = Math.floor((remSec % 3600) / 60);
+              const s = remSec % 60;
+              const clock =
+                h > 0
+                  ? `${h} 小时 ${m} 分 ${s} 秒`
+                  : m > 0
+                    ? `${m} 分 ${s} 秒`
+                    : `${s} 秒`;
+              return (
+                <p className="passbox-warn">
+                  已锁定，请 {clock} 后再试
+                  {status?.failCount ? ` · 累计错误 ${status.failCount} / 45` : ""}
+                </p>
+              );
+            })()}
             <label className="field">
               <span className="sr-only">密码</span>
               <input
@@ -938,9 +1120,15 @@ export default function Passbox({
                 autoComplete="current-password"
                 placeholder="主密码"
                 autoFocus
+                disabled={(status?.lockUntilMs ?? 0) > nowTick}
               />
             </label>
-            <button type="button" className="passbox-primary" onClick={() => void onUnlock()}>
+            <button
+              type="button"
+              className="passbox-primary"
+              onClick={() => void onUnlock()}
+              disabled={(status?.lockUntilMs ?? 0) > nowTick}
+            >
               {t("unlock")}
             </button>
             {(status?.hint1 || status?.hint2) && (
@@ -1089,12 +1277,19 @@ export default function Passbox({
                   <span className="passbox-card-type">{labels[e.type]}</span>
                   {e.type === "api" ? (
                     <div className="passbox-card-lines">
-                      <span>URL  {fieldStr(e.fields, "url") || "—"}</span>
+                      {getApiUrls(e.fields)
+                        .filter((u) => u.trim())
+                        .map((_u, i, arr) => (
+                          <span key={`u${i}`}>
+                            {arr.length > 1 ? `URL ${i + 1}` : "URL"}  ••••••••
+                          </span>
+                        ))}
+                      {getApiUrls(e.fields).every((u) => !u.trim()) && <span>URL  —</span>}
                       {getApiKeys(e.fields)
-                        .filter((k) => k.trim())
-                        .map((k, i, arr) => (
-                          <span key={i}>
-                            {arr.length > 1 ? `KEY ${i + 1}` : "KEY"}  {maskSecret(k)}
+                        .filter((key) => key.trim())
+                        .map((_key, i, arr) => (
+                          <span key={`k${i}`}>
+                            {arr.length > 1 ? `KEY ${i + 1}` : "KEY"}  ••••••••
                           </span>
                         ))}
                       {getApiKeys(e.fields).every((k) => !k.trim()) && <span>KEY  —</span>}
@@ -1125,48 +1320,70 @@ export default function Passbox({
           </div>
 
           <div className="passbox-edit-form" key={`${formGen}-${draft.id || "new"}-${draft.type}`}>
-            <label className="field">
-              <span>{t("name")}</span>
-              <div className="field-row">
-                <input
-                  type="text"
-                  name={`vault-title-${formGen}-${draft.type}`}
-                  value={draft.title}
-                  onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
-                  placeholder="名称"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                />
-                <button type="button" className="icon-btn" title="复制" onClick={() => void copyText(draft.title)}>
-                  <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
-              </div>
-            </label>
+            {draft.type !== "douyin" &&
+              draft.type !== "apple" &&
+              draft.type !== "google" &&
+              draft.type !== "bank" && (
+              <label className="field">
+                <span>{t("name")}</span>
+                <div className="field-row">
+                  <input
+                    type="text"
+                    name={`vault-title-${formGen}-${draft.type}`}
+                    value={draft.title}
+                    onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
+                    placeholder="名称"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  <button type="button" className="icon-btn" title="复制" onClick={() => void copyText(draft.title)}>
+                    <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                  </button>
+                </div>
+              </label>
+            )}
 
             {draft.type === "api" && (
               <>
-                <label className="field">
-                  <span>URL</span>
-                  <div className="field-row">
-                    <input
-                      type="text"
-                      value={fieldStr(draft.fields, "url")}
-                      onChange={(e) => setField("url", e.target.value)}
-                      placeholder="https://api.example.com/v1"
-                    />
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      title="复制 URL"
-                      onClick={() => void copyText(fieldStr(draft.fields, "url"), "已复制 URL")}
-                    >
-                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
-                    </button>
-                  </div>
-                </label>
+                {getApiUrls(draft.fields).map((u, i, arr) => (
+                  <label className="field" key={`url-${i}`}>
+                    <span>{arr.length > 1 ? `URL ${i + 1}` : "URL"}</span>
+                    <div className="field-row">
+                      <input
+                        type="text"
+                        value={u}
+                        onChange={(e) => setApiUrlAt(i, e.target.value)}
+                        placeholder="https://api.example.com/v1"
+                        autoComplete="off"
+                      />
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title="复制 URL"
+                        onClick={() => void copyText(u, "已复制 URL")}
+                      >
+                        <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                      </button>
+                      {arr.length > 1 && (
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          title="删除此 URL"
+                          onClick={() => removeApiUrl(i)}
+                        >
+                          <Trash2 size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                        </button>
+                      )}
+                    </div>
+                  </label>
+                ))}
+                <button type="button" className="passbox-add-key" onClick={addApiUrl}>
+                  <Plus size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                  添加 URL
+                </button>
                 {getApiKeys(draft.fields).map((k, i, arr) => (
-                  <label className="field" key={i}>
+                  <label className="field" key={`key-${i}`}>
                     <span>{arr.length > 1 ? `KEY ${i + 1}` : "KEY"}</span>
                     <div className="field-row">
                       <input
@@ -1187,7 +1404,7 @@ export default function Passbox({
                       {arr.length > 1 && (
                         <button
                           type="button"
-                          className="icon-btn danger"
+                          className="icon-btn"
                           title="删除此 KEY"
                           onClick={() => removeApiKey(i)}
                         >
@@ -1205,32 +1422,180 @@ export default function Passbox({
             )}
 
             {draft.type === "bank" && (
-              <label className="field">
-                <span>卡号</span>
-                <div className="field-row">
-                  <input
-                    type="text"
-                    value={fieldStr(draft.fields, "cardNumber")}
-                    onChange={(e) => setField("cardNumber", e.target.value)}
-                    placeholder="银行卡号"
-                    autoComplete="off"
-                  />
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    title="复制"
-                    onClick={() => void copyText(fieldStr(draft.fields, "cardNumber"))}
-                  >
-                    <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
-                  </button>
-                </div>
-              </label>
-            )}
-
-            {isAccountLike(draft.type) && (
               <>
                 <label className="field">
-                  <span>{draft.type === "apple" ? "Apple ID" : "账号"}</span>
+                  <span>开户名</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-bank-holder"
+                      value={fieldStr(draft.fields, "holderName")}
+                      onChange={(e) => setField("holderName", e.target.value)}
+                      placeholder="持卡人姓名"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "holderName"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>卡号</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-bank-card"
+                      value={fieldStr(draft.fields, "cardNumber")}
+                      onChange={(e) => setField("cardNumber", e.target.value)}
+                      placeholder="银行卡号"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "cardNumber"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>银行</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-bank-name"
+                      value={fieldStr(draft.fields, "bankName")}
+                      onChange={(e) => setField("bankName", e.target.value)}
+                      placeholder="如 招商银行、工商银行"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "bankName"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+              </>
+            )}
+
+            {draft.type === "douyin" && (
+              <>
+                <label className="field">
+                  <span>用户名</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-douyin-user"
+                      value={fieldStr(draft.fields, "username")}
+                      onChange={(e) => setField("username", e.target.value)}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="用户名 / 昵称"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "username"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>抖音号</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-douyin-id"
+                      value={fieldStr(draft.fields, "douyinId")}
+                      onChange={(e) => setField("douyinId", e.target.value)}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="抖音号"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "douyinId"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>手机号</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-douyin-phone"
+                      value={fieldStr(draft.fields, "phone")}
+                      onChange={(e) => setField("phone", e.target.value)}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="手机号"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "phone"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>密码</span>
+                  <div className="field-row">
+                    <input
+                      type="text"
+                      name="vault-douyin-pass"
+                      value={fieldStr(draft.fields, "password")}
+                      onChange={(e) => setField("password", e.target.value)}
+                      autoComplete="new-password"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder="密码"
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="复制"
+                      onClick={() => void copyText(fieldStr(draft.fields, "password"))}
+                    >
+                      <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </label>
+              </>
+            )}
+
+            {isAccountLike(draft.type) && draft.type !== "douyin" && (
+              <>
+                <label className="field">
+                  <span>
+                    {draft.type === "apple"
+                      ? "Apple ID"
+                      : draft.type === "email"
+                        ? "邮箱"
+                        : "账号"}
+                  </span>
                   <div className="field-row">
                     <input
                       type="text"
@@ -1245,7 +1610,9 @@ export default function Passbox({
                           ? "email@icloud.com"
                           : draft.type === "google"
                             ? "email@gmail.com"
-                            : "账号 / 手机号 / 邮箱"
+                            : draft.type === "email"
+                              ? "name@example.com"
+                              : "账号 / 手机号 / 邮箱"
                       }
                     />
                     <button
@@ -1281,6 +1648,31 @@ export default function Passbox({
                     </button>
                   </div>
                 </label>
+                {draft.type === "apple" && (
+                  <label className="field">
+                    <span>地区</span>
+                    <div className="field-row">
+                      <input
+                        type="text"
+                        name="vault-apple-region"
+                        value={fieldStr(draft.fields, "region")}
+                        onChange={(e) => setField("region", e.target.value)}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        placeholder="国家 / 地区，如 中国、美国、日本"
+                      />
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title="复制"
+                        onClick={() => void copyText(fieldStr(draft.fields, "region"))}
+                      >
+                        <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                      </button>
+                    </div>
+                  </label>
+                )}
               </>
             )}
 

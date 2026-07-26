@@ -403,7 +403,8 @@ pub fn run() {
                     .permission("allow-vault-delete")
                     .permission("allow-vault-clear-destroyed")
                     .permission("dialog:default")
-                    .permission("clipboard-manager:default")
+                    .permission("clipboard-manager:allow-write-text")
+                    .permission("clipboard-manager:allow-read-text")
                     .permission("store:default")
                     .permission("fs:default")
                     .permission("opener:default"),
