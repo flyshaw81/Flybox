@@ -423,33 +423,35 @@ fn integrity_check(app: &AppHandle, state: &VaultState) -> Result<(), String> {
             Err("VAULT_DESTROYED".into())
         }
         (Some(disk), None) => {
-            // 旧版 v1 箱：首次补守卫，不炸
-            if disk.version < VAULT_FORMAT_VERSION {
-                let mut d = disk;
+            // 缺守卫：补写即可（升级/迁移常见），绝不因缺守卫销毁
+            let mut d = disk;
+            if d.version < VAULT_FORMAT_VERSION {
                 d.version = VAULT_FORMAT_VERSION;
                 save_disk(app, &d)?;
-                write_guard(app, &d)?;
-                return Ok(());
             }
-            let _ = state.session.lock().map(|mut s| *s = None);
-            let _ = wipe_all_app_data(app);
-            Err("VAULT_DESTROYED".into())
+            write_guard(app, &d)?;
+            Ok(())
         }
         (Some(disk), Some(g)) => {
             let fp = vault_fingerprint(&disk);
+            // 只有「箱子内容 / 失败次数被改」才当篡改。exe 指纹变化 = 正常升级/重装，只重封守卫。
+            let meta_ok = g.fail_count == disk.fail_count
+                && g.lock_until_ms == disk.lock_until_ms
+                && g.vault_fp == fp;
+            if !meta_ok {
+                let _ = state.session.lock().map(|mut s| *s = None);
+                let _ = wipe_all_app_data(app);
+                return Err("VAULT_DESTROYED".into());
+            }
             let exe = current_exe_hash();
             let exe_ok = g.exe_hash == "DEBUG"
                 || exe == "DEBUG"
                 || g.exe_hash == exe
                 || g.exe_hash == "UNKNOWN"
                 || exe == "UNKNOWN";
-            let meta_ok = g.fail_count == disk.fail_count
-                && g.lock_until_ms == disk.lock_until_ms
-                && g.vault_fp == fp;
-            if !meta_ok || !exe_ok {
-                let _ = state.session.lock().map(|mut s| *s = None);
-                let _ = wipe_all_app_data(app);
-                return Err("VAULT_DESTROYED".into());
+            if !exe_ok {
+                // 正式版安装包每次编译 hash 都不同；绑死 exe 会在「打包安装最新版」时误炸用户数据
+                write_guard(app, &disk)?;
             }
             Ok(())
         }
