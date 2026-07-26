@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
@@ -409,6 +409,8 @@ export default function Passbox({
     };
   }, []);
 
+  // 会话策略：本次启动解锁后，切模块也不上锁；关软件才清会话。手动「立即上锁」仍可用。
+
   const filtered = useMemo(() => {
     if (tab === "all") return entries;
     return entries.filter((e) => e.type === tab);
@@ -708,7 +710,11 @@ export default function Passbox({
 
   const deleteEntryById = async (id: string) => {
     if (!id) return;
-    if (!window.confirm("确定删除这条记录？删除后无法恢复。")) return;
+    const ok = await ask("确定删除这条记录？删除后无法恢复。", {
+      title: "删除",
+      kind: "warning",
+    });
+    if (!ok) return;
     try {
       const list = await invoke<VaultEntry[]>("vault_delete", { id });
       setEntries(list.map(normalizeEntry));
@@ -746,10 +752,8 @@ export default function Passbox({
     {
       id: "gallery",
       label: "返回图库",
-      onClick: () => {
-        void onLock();
-        onBackToGallery();
-      },
+      // 只切模块，不锁箱：本会话解锁一次即可
+      onClick: () => onBackToGallery(),
     },
   ];
 

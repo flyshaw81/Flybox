@@ -52,8 +52,8 @@ type ImageEntry = {
   height: number;
 };
 
-/** 网格 · 瀑布 · 单张 */
-type ViewMode = "grid" | "waterfall" | "single";
+/** 网格 · 瀑布；点缩略图放大 = 单图预览（灯箱），不再单独设「单图模式」 */
+type ViewMode = "grid" | "waterfall";
 
 const STORE_FILE = "settings.json";
 const VAULT_KEY = "vaultPath";
@@ -400,9 +400,16 @@ export default function App() {
       });
       if (gen !== loadGen.current) return;
       setImages(list);
+      // 刷新后列表变短时，修正正在看的大图下标，避免空白
+      setActiveIndex((i) => {
+        if (i == null) return i;
+        if (list.length === 0) return null;
+        return Math.min(i, list.length - 1);
+      });
     } catch (e) {
       if (gen !== loadGen.current) return;
       setImages([]);
+      setActiveIndex(null);
       setError(String(e));
     } finally {
       if (gen === loadGen.current) setLoading(false);
@@ -567,11 +574,8 @@ export default function App() {
   const setMode = (mode: ViewMode) => {
     setViewMode(mode);
     resetView();
-    if (mode === "single") {
-      setActiveIndex((i) => i ?? 0);
-    } else {
-      setActiveIndex(null);
-    }
+    // 换浏览布局时关掉大图，避免模式叠在一起
+    setActiveIndex(null);
   };
 
   const imageMenuItems = useCallback(
@@ -665,32 +669,18 @@ export default function App() {
     [vault, loading, pickVault, loadImages, t, switchModule],
   );
 
-  // 灯箱：网格/瀑布点图后；单张模式始终看图
-  const lightboxOpen =
-    viewMode !== "single" && activeIndex != null && images[activeIndex] != null;
-  const singleOpen = viewMode === "single" && images.length > 0;
-  const showViewer = lightboxOpen || singleOpen;
-
-  const currentIndex = singleOpen
-    ? activeIndex ?? 0
-    : lightboxOpen
-      ? activeIndex
-      : null;
-
-  useEffect(() => {
-    if (viewMode === "single" && images.length > 0 && activeIndex == null) {
-      setActiveIndex(0);
-    }
-  }, [viewMode, images.length, activeIndex]);
+  // 点缩略图放大 = 单图预览（灯箱）
+  const lightboxOpen = activeIndex != null && images[activeIndex] != null;
+  const showViewer = lightboxOpen;
+  const currentIndex = lightboxOpen ? activeIndex : null;
 
   useEffect(() => {
     if (!showViewer) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (lightboxOpen) {
-          closeLightbox();
-          return;
-        }
+        e.preventDefault();
+        closeLightbox();
+        return;
       }
       if (e.key === "ArrowLeft") {
         e.preventDefault();
@@ -711,7 +701,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showViewer, lightboxOpen, closeLightbox, goPrev, goNext]);
+  }, [showViewer, closeLightbox, goPrev, goNext]);
 
   const folderName = vault
     ? vault.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || vault
@@ -777,8 +767,8 @@ export default function App() {
     </nav>
   );
 
-  /** 图库预览大图：沉浸式顶栏（返回 + 文件名） */
-  const galleryLightboxChrome = viewing && lightboxOpen && appModule === "gallery";
+  /** 点开大图后的沉浸顶栏：返回 + 文件名 */
+  const galleryViewerChrome = viewing != null && appModule === "gallery" && lightboxOpen;
 
   /** 右侧：当前模块工具 + 语言（窗控始终在最右） */
   const topbarActions = (
@@ -870,14 +860,6 @@ export default function App() {
                 >
                   <Columns3 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
-                <button
-                  type="button"
-                  className={viewMode === "single" ? "icon-btn on" : "icon-btn"}
-                  title={t("single")}
-                  onClick={() => setMode("single")}
-                >
-                  <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-                </button>
               </>
             )}
           </>
@@ -902,7 +884,7 @@ export default function App() {
         onDoubleClick={() => void appWindow.toggleMaximize()}
       >
         <div className="brand" data-tauri-drag-region>
-          {galleryLightboxChrome ? (
+          {galleryViewerChrome && viewing ? (
             <>
               <button
                 type="button"
@@ -1029,7 +1011,7 @@ export default function App() {
       )}
 
       {/* Keep gallery mounted under lightbox so scroll position is not lost. */}
-      {appModule === "gallery" && vault && !singleOpen && (
+      {appModule === "gallery" && vault && (
         <main
           className={lightboxOpen ? "content content-hold" : "content"}
           ref={bindContent}
@@ -1075,7 +1057,7 @@ export default function App() {
         showViewer &&
         currentIndex != null &&
         images[currentIndex] && (
-        <div className={viewMode === "single" ? "viewer page" : "viewer overlay"}>
+        <div className="viewer overlay">
           <div
             className={zoom > 1 ? "stage stage-zoomed" : "stage"}
             onContextMenu={(e) => {
@@ -1083,7 +1065,7 @@ export default function App() {
               if (!entry) return;
               openCtxMenu(
                 e,
-                imageMenuItems(entry, currentIndex, { lightbox: lightboxOpen }),
+                imageMenuItems(entry, currentIndex, { lightbox: true }),
                 setCtxMenu,
               );
             }}
@@ -1158,19 +1140,19 @@ export default function App() {
                 dragRef.current = null;
               }}
               onClick={(e) => {
-                // 灯箱：点非图片区域关闭；单张模式不关
-                if (!lightboxOpen) return;
+                // 点图片外空白关闭大图；放大后用未缩放尺寸+平移判断，避免 transform 盖住空白
                 if (dragRef.current?.moved) return;
                 if ((e.target as HTMLElement).closest(".nav")) return;
                 const img = (e.currentTarget as HTMLElement).querySelector("img");
                 if (img) {
-                  const r = img.getBoundingClientRect();
-                  if (
-                    e.clientX >= r.left &&
-                    e.clientX <= r.right &&
-                    e.clientY >= r.top &&
-                    e.clientY <= r.bottom
-                  ) {
+                  const box = e.currentTarget.getBoundingClientRect();
+                  const w = img.offsetWidth;
+                  const h = img.offsetHeight;
+                  const cx = box.left + box.width / 2 + pan.x;
+                  const cy = box.top + box.height / 2 + pan.y;
+                  const dx = (e.clientX - cx) / (zoom || 1);
+                  const dy = (e.clientY - cy) / (zoom || 1);
+                  if (Math.abs(dx) <= w / 2 && Math.abs(dy) <= h / 2) {
                     return;
                   }
                 }

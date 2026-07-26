@@ -3,7 +3,7 @@
  * 左列表 / 右编辑 / 本地持久化 / 自动保存（参考 Notepad 式简洁，不做 Markdown 重编辑器）
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { load } from "@tauri-apps/plugin-store";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
@@ -187,6 +187,8 @@ export default function Notepad({
   /** 左侧笔记列表展开 / 收起 */
   const [sideOpen, setSideOpen] = useState(true);
   const saveTimer = useRef<number | null>(null);
+  /** 尚未落盘的最新列表；离开模块时立刻冲刷，避免丢最后一次输入 */
+  const dirtyListRef = useRef<Note[] | null>(null);
   const notesRef = useRef<Note[]>([]);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const titleRef = useRef<HTMLInputElement | null>(null);
@@ -242,8 +244,11 @@ export default function Notepad({
 
   const schedulePersist = useCallback(
     (list: Note[]) => {
+      dirtyListRef.current = list;
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
+        dirtyListRef.current = null;
+        saveTimer.current = null;
         void persist(list);
       }, 400);
     },
@@ -268,7 +273,22 @@ export default function Notepad({
     })();
     return () => {
       cancelled = true;
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, []);
+
+  // 切走 / 卸载时：取消定时器并立刻写入未保存内容
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current != null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      const pending = dirtyListRef.current;
+      if (!pending) return;
+      dirtyListRef.current = null;
+      void getNotesStore()
+        .then((store) => store.set(NOTES_KEY, pending))
+        .catch(() => undefined);
     };
   }, []);
 
@@ -308,8 +328,12 @@ export default function Notepad({
     schedulePersist(next);
   };
 
-  const deleteNote = (id: string) => {
-    if (!window.confirm(t("deleteNoteConfirm"))) return;
+  const deleteNote = async (id: string) => {
+    const ok = await ask(t("deleteNoteConfirm"), {
+      title: t("delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
     const next = notesRef.current.filter((n) => n.id !== id);
     setNotes(next);
     if (activeId === id) {
@@ -329,7 +353,7 @@ export default function Notepad({
       id: "del",
       label: t("delete"),
       danger: true,
-      onClick: () => deleteNote(n.id),
+      onClick: () => void deleteNote(n.id),
     },
   ];
 
@@ -363,6 +387,30 @@ export default function Notepad({
     } catch {
       savedRangeRef.current = null;
     }
+  };
+
+  /** 恢复正文选区；失败则读当前选区。没有落在正文内的选区时返回 false（避免格式化整篇） */
+  const ensureBodySelection = (requireNonCollapsed = false): boolean => {
+    const el = bodyRef.current;
+    if (!el) return false;
+    if (restoreSelection()) {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        const r = sel.getRangeAt(0);
+        if (el.contains(r.commonAncestorContainer)) {
+          if (requireNonCollapsed && r.collapsed) return false;
+          return true;
+        }
+      }
+    }
+    captureSelection(!requireNonCollapsed);
+    if (!restoreSelection()) return false;
+    if (requireNonCollapsed) {
+      const sel = window.getSelection();
+      const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
+      if (!r || r.collapsed) return false;
+    }
+    return true;
   };
 
   /** 在光标处插入图片（data URL），支持粘贴 / 加号选图 */
@@ -532,15 +580,20 @@ export default function Notepad({
   const runCmd = (cmd: string, value?: string) => {
     const el = bodyRef.current;
     if (!el) return;
-    restoreSelection();
+    // 撤销/重做/全选不依赖选区；其它格式命令没有正文选区时禁止执行（否则会改整篇）
+    const free =
+      cmd === "undo" ||
+      cmd === "redo" ||
+      cmd === "selectAll" ||
+      cmd === "styleWithCSS";
+    if (!free && !ensureBodySelection(false)) return;
     el.focus();
     try {
       document.execCommand(cmd, false, value);
     } catch {
       /* ignore */
     }
-    // 命令后刷新保存的选区
-    captureSelection();
+    captureSelection(true);
     onBodyInput();
   };
 
@@ -549,8 +602,11 @@ export default function Notepad({
   ) => {
     const el = bodyRef.current;
     if (!el) return;
-    restoreSelection();
-    el.focus();
+    if (action !== "undo" && action !== "redo" && action !== "selectAll") {
+      if (!ensureBodySelection(false)) return;
+    } else {
+      el.focus();
+    }
     if (action === "paste") {
       try {
         const text = await readText();
@@ -569,10 +625,52 @@ export default function Notepad({
     runCmd(action);
   };
 
+  /** 只给当前选中文字包颜色 span；禁止无选区时 execCommand 污染全文 */
+  const wrapSelectionColor = (color: string): boolean => {
+    const range = savedRangeRef.current;
+    if (!range || range.collapsed) return false;
+    try {
+      const live = range.cloneRange();
+      const span = document.createElement("span");
+      span.style.color = color;
+      try {
+        live.surroundContents(span);
+      } catch {
+        const frag = live.extractContents();
+        span.appendChild(frag);
+        live.insertNode(span);
+      }
+      const sel = window.getSelection();
+      if (sel) {
+        const nr = document.createRange();
+        nr.selectNodeContents(span);
+        sel.removeAllRanges();
+        sel.addRange(nr);
+        savedRangeRef.current = nr.cloneRange();
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const applyColor = (color: string) => {
-    restoreSelection();
-    runCmd("styleWithCSS", "true");
-    runCmd("foreColor", color);
+    const el = bodyRef.current;
+    if (!el) return;
+    // 必须有选中文字，否则不改（避免整篇变色）
+    if (!ensureBodySelection(true)) return;
+    el.focus();
+    // 一次改完再保存，中间不要 onBodyInput（重渲染会弄丢选区，导致第二次命令打到全文）
+    if (!wrapSelectionColor(color)) {
+      try {
+        document.execCommand("styleWithCSS", false, "true");
+        document.execCommand("foreColor", false, color);
+      } catch {
+        /* ignore */
+      }
+    }
+    captureSelection(true);
+    onBodyInput();
   };
 
   /** 用 span 包一层：execCommand 在 WebView 里偶发失效 */
@@ -581,13 +679,13 @@ export default function Notepad({
     if (!range || range.collapsed) return false;
     try {
       if (color === "transparent") {
-        // 尽量取消：hilite 透明
         restoreSelection();
         document.execCommand("styleWithCSS", false, "true");
         document.execCommand("hiliteColor", false, "transparent");
         document.execCommand("backColor", false, "transparent");
         return true;
       }
+      const live = range.cloneRange();
       const span = document.createElement("span");
       span.setAttribute("data-hl", "1");
       span.style.backgroundColor = color;
@@ -595,13 +693,12 @@ export default function Notepad({
       span.style.borderRadius = "2px";
       span.style.padding = "0 2px";
       try {
-        range.surroundContents(span);
+        live.surroundContents(span);
       } catch {
-        const frag = range.extractContents();
+        const frag = live.extractContents();
         span.appendChild(frag);
-        range.insertNode(span);
+        live.insertNode(span);
       }
-      // 选区落在高亮块上
       const sel = window.getSelection();
       if (sel) {
         const nr = document.createRange();
@@ -620,10 +717,9 @@ export default function Notepad({
   const applyHighlight = (color: string) => {
     const el = bodyRef.current;
     if (!el) return;
-    if (!restoreSelection()) {
-      captureSelection();
-      if (!restoreSelection()) return;
-    }
+    // 高亮必须有选中段，禁止无选区时改整篇
+    if (!ensureBodySelection(true)) return;
+    el.focus();
     if (color === "transparent") {
       try {
         document.execCommand("styleWithCSS", false, "true");
@@ -632,7 +728,6 @@ export default function Notepad({
       } catch {
         /* ignore */
       }
-      // 去掉我们自己包的 data-hl
       try {
         const sel = window.getSelection();
         if (sel && sel.rangeCount > 0) {
@@ -647,18 +742,16 @@ export default function Notepad({
       } catch {
         /* ignore */
       }
-    } else {
-      // 直接包亮色 span（比 hiliteColor 更稳、颜色更亮）
-      if (!wrapSelectionHighlight(color)) {
-        try {
-          document.execCommand("styleWithCSS", false, "true");
-          document.execCommand("hiliteColor", false, color);
-          document.execCommand("backColor", false, color);
-        } catch {
-          /* ignore */
-        }
+    } else if (!wrapSelectionHighlight(color)) {
+      try {
+        document.execCommand("styleWithCSS", false, "true");
+        document.execCommand("hiliteColor", false, color);
+        document.execCommand("backColor", false, color);
+      } catch {
+        /* ignore */
       }
     }
+    captureSelection(true);
     onBodyInput();
   };
 
@@ -1088,6 +1181,8 @@ export default function Notepad({
                 data-placeholder={t("noteBody")}
                 onInput={onBodyInput}
                 onPaste={(e) => void onBodyPaste(e)}
+                onMouseUp={() => captureSelection()}
+                onKeyUp={() => captureSelection(true)}
                 onContextMenu={(e) => openCtxMenu(e, editorMenu(), setCtxMenu)}
                 spellCheck={false}
                 style={{ fontSize: fontSize }}
