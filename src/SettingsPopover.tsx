@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useI18n } from "./i18n";
 import { useTheme, type ThemeMode } from "./theme";
+import { APP_VERSION_LABEL } from "./appVersion";
 
 export type AppSettings = {
   restoreVault: boolean;
@@ -15,8 +16,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   deepScanDefault: false,
   startMinimized: false,
 };
-
-const APP_VERSION = "0.1.0";
 
 type Props = {
   open: boolean;
@@ -191,7 +190,7 @@ export default function SettingsPopover({
 
       <div className="settings-about">
         <div className="settings-about-name">
-          FLYBOX · {t("settingsVersion")} {APP_VERSION}
+          FLYBOX · {t("settingsVersion")} {APP_VERSION_LABEL}
         </div>
         <div className="settings-about-note">{t("settingsLocalOnly")}</div>
       </div>
