@@ -495,24 +495,56 @@ button:focus-visible {
   overflow: auto;
   padding: 12px 20px 28px;
   background: var(--bg);
-  /* Custom scrollbar: black track, dark-gray thumb */
+}
+
+/* 全局细滚动条（暗色、贴合顶栏风格，别用系统那根粗灰条） */
+* {
   scrollbar-width: thin;
-  scrollbar-color: #3a3a3a #000000;
+  scrollbar-color: #3a3a3a transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #333;
+  border: 0;
+  border-radius: 3px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .content::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 
 .content::-webkit-scrollbar-track {
-  background: #000;
+  background: transparent;
 }
 
 .content::-webkit-scrollbar-thumb {
-  background: #3a3a3a;
+  background: #333;
   border: 0;
-  border-radius: 0;
+  border-radius: 3px;
 }
 
 .content::-webkit-scrollbar-thumb:hover {
@@ -520,7 +552,7 @@ button:focus-visible {
 }
 
 .content::-webkit-scrollbar-corner {
-  background: #000;
+  background: transparent;
 }
 
 /* Lightbox open: keep gallery in DOM (preserve scroll) but hide visually */
@@ -1362,8 +1394,6 @@ button:focus-visible {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--muted) var(--bg);
 }
 
 .notepad-empty-list {
@@ -1439,8 +1469,6 @@ button:focus-visible {
   flex-shrink: 0;
   background: var(--bg-elev, #0c0c0c);
   overflow-x: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #333 transparent;
 }
 
 .notepad-tool {
@@ -1502,6 +1530,61 @@ button:focus-visible {
   flex-shrink: 0;
 }
 
+/* Notion 风格封面：宽图 2.5:1，显示高度约 200px，object-fit cover */
+.notepad-cover {
+  position: relative;
+  width: 100%;
+  height: 200px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: #111;
+}
+
+.notepad-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center center;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+
+.notepad-cover-actions {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.notepad-cover:hover .notepad-cover-actions {
+  opacity: 1;
+}
+
+.notepad-cover-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #eee;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.notepad-cover-btn:hover {
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+}
+
 .notepad-title {
   border: 0;
   outline: none;
@@ -1537,6 +1620,62 @@ button:focus-visible {
   color: var(--muted);
 }
 
+.notepad-editor-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.notepad-editor-wrap .tiptap,
+.notepad-rich.notepad-tiptap {
+  flex: 1;
+  min-height: 100%;
+  outline: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.65;
+  padding: 8px 28px 12px;
+  width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+  caret-color: var(--text);
+}
+
+.notepad-editor-wrap .tiptap p {
+  margin: 0 0 0.35em;
+}
+
+.notepad-editor-wrap .tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #3a3a3a;
+  pointer-events: none;
+  height: 0;
+}
+
+.notepad-editor-wrap .tiptap img.notepad-img,
+.notepad-editor-wrap .tiptap img {
+  max-width: min(100%, 720px);
+  height: auto;
+  display: block;
+  margin: 10px 0;
+}
+
+/* TipTap Highlight → <mark>；只给高亮块深色字，绝不污染未选中段落 */
+.notepad-editor-wrap .tiptap mark {
+  border-radius: 2px;
+  padding: 0 1px;
+  color: #111;
+}
+
 .notepad-rich {
   overflow: auto;
   white-space: pre-wrap;
@@ -1544,6 +1683,8 @@ button:focus-visible {
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
+  caret-color: var(--text);
+  color: var(--text);
 }
 
 .notepad-rich:empty::before {
@@ -1662,18 +1803,194 @@ button:focus-visible {
     #1a1a1a;
 }
 
+/* 文字色「默认」：跟随主题的圆点示意 */
+.notepad-color-dot.text-default {
+  background: var(--text);
+  opacity: 0.85;
+}
+
 .notepad-color-dot:hover {
   border-color: #888;
   transform: scale(1.12);
 }
 
-/* 高亮块：亮底 + 深色字，选中后一眼能看见 */
-.notepad-rich span[data-hl="1"],
-.notepad-rich span[style*="background-color"],
-.notepad-rich span[style*="background"],
-.notepad-rich font[style*="background"] {
+/* 自定义色：小彩虹格 + 紧凑色值面板（可输 #RRGGBB） */
+.notepad-hex-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.notepad-color-pick {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid #555;
+  border-radius: 3px;
+  cursor: pointer;
+  background:
+    linear-gradient(135deg, #e07070 0%, #e0d060 40%, #70c090 70%, #6a9ee0 100%);
+}
+
+.notepad-color-pick.hl {
+  border-radius: 3px;
+}
+
+.notepad-color-pick:hover {
+  border-color: #aaa;
+}
+
+/* 紧凑取色板：色板 + 色相 + 色值（portal / fixed） */
+.notepad-hex-pop {
+  position: fixed;
+  z-index: 10050;
+  width: 188px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #161616;
+  border: 1px solid #333;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+
+.notepad-sv {
+  position: relative;
+  width: 100%;
+  height: 110px;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.notepad-sv-white {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to right, #fff, transparent);
+  pointer-events: none;
+}
+
+.notepad-sv-black {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, #000, transparent);
+  pointer-events: none;
+}
+
+.notepad-sv-knob {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.notepad-hue {
+  position: relative;
+  width: 100%;
+  height: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  touch-action: none;
+  background: linear-gradient(
+    to right,
+    #f00 0%,
+    #ff0 17%,
+    #0f0 33%,
+    #0ff 50%,
+    #00f 67%,
+    #f0f 83%,
+    #f00 100%
+  );
+}
+
+.notepad-hue-knob {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  background: transparent;
+  pointer-events: none;
+}
+
+.notepad-hex-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notepad-hex-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: 1px solid #444;
+  flex-shrink: 0;
+}
+
+.notepad-hex-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #0e0e0e;
+  color: #e8e8e8;
+  font: inherit;
+  font-size: 12px;
+  font-family: ui-monospace, Consolas, monospace;
+  outline: none;
+}
+
+.notepad-hex-input:focus {
+  border-color: #666;
+}
+
+.notepad-hex-apply {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  background: #252525;
+  color: #ddd;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.notepad-hex-apply:hover {
+  background: #303030;
+  color: #fff;
+}
+
+/* 高亮块：亮底 + 深色字；只作用于 data-hl，避免普通色 span 被误伤 */
+.notepad-rich span[data-hl="1"] {
   border-radius: 2px;
-  padding: 0 2px;
+  padding: 0 1px;
+  color: #111;
+}
+
+/* 空格式节点不占位，防彩色竖条残影 */
+.notepad-rich span:empty,
+.notepad-rich font:empty {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: none !important;
 }
 
 .notepad-status {

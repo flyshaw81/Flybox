@@ -1,8 +1,24 @@
 /**
- * 记事本 — 体验对齐常见开源轻量 Notes：
- * 左列表 / 右编辑 / 本地持久化 / 自动保存（参考 Notepad 式简洁，不做 Markdown 重编辑器）
+ * 记事本 — 正文用 TipTap（ProseMirror），选区/加粗/颜色/字号走成熟方案，
+ * 不再自研 contenteditable + execCommand 补丁。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
+import { useEditor, EditorContent, type Editor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Underline from "@tiptap/extension-underline";
+import { TextStyle, Color, FontSize } from "@tiptap/extension-text-style";
+import Highlight from "@tiptap/extension-highlight";
+import Placeholder from "@tiptap/extension-placeholder";
+import Image from "@tiptap/extension-image";
 import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { load } from "@tauri-apps/plugin-store";
@@ -18,6 +34,7 @@ import {
   Italic,
   PanelLeft,
   PanelLeftClose,
+  PanelTop,
   Plus,
   Redo2,
   Scissors,
@@ -26,8 +43,9 @@ import {
   TextSelect,
   Trash2,
   Type,
-  Underline,
+  Underline as UnderlineIcon,
   Undo2,
+  X,
 } from "lucide-react";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { useI18n } from "./i18n";
@@ -42,7 +60,6 @@ const ICO = 16;
 const NOTES_STORE = "notepad.json";
 const NOTES_KEY = "notes";
 
-/** 常用表情（点选插入；也支持系统表情面板 Win+. / 直接粘贴） */
 const EMOJIS = [
   "😀", "😁", "😂", "🤣", "😊", "😍", "🥰", "😘", "😜", "🤔",
   "😎", "🤩", "😭", "😡", "🤯", "😱", "😴", "🤗", "🫡", "🤝",
@@ -57,19 +74,48 @@ export type Note = {
   title: string;
   body: string;
   updatedAt: number;
+  /** Notion 风格封面，JPEG data URL，约 1500×600（2.5:1） */
+  cover?: string;
 };
+
+/** Notion 常用封面比例 1500×600 */
+const COVER_W = 1500;
+const COVER_H = 600;
+
+const TEXT_COLORS = [
+  { id: "default", color: "", label: "默" },
+  { id: "white", color: "#f2f2f2", label: "白" },
+  { id: "red", color: "#e07070", label: "红" },
+  { id: "orange", color: "#e0a050", label: "橙" },
+  { id: "yellow", color: "#e0d060", label: "黄" },
+  { id: "green", color: "#70c090", label: "绿" },
+  { id: "blue", color: "#6a9ee0", label: "蓝" },
+  { id: "purple", color: "#b080e0", label: "紫" },
+];
+
+const HIGHLIGHT_COLORS = [
+  { id: "none", color: "", label: "无" },
+  { id: "yellow", color: "#f5d547", label: "黄" },
+  { id: "green", color: "#5ecf8a", label: "绿" },
+  { id: "blue", color: "#5aa8f0", label: "蓝" },
+  { id: "pink", color: "#f080a0", label: "粉" },
+  { id: "orange", color: "#f0a050", label: "橙" },
+  { id: "purple", color: "#c090f0", label: "紫" },
+];
+
+const FONT_SIZES = [
+  { id: "S", px: 13 },
+  { id: "M", px: 15 },
+  { id: "L", px: 18 },
+  { id: "XL", px: 24 },
+] as const;
 
 function newId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function emptyNote(): Note {
-  return {
-    id: newId(),
-    title: "",
-    body: "",
-    updatedAt: Date.now(),
-  };
+  return { id: newId(), title: "", body: "", updatedAt: Date.now() };
 }
 
 function stripHtml(html: string): string {
@@ -113,7 +159,6 @@ function readBlobAsDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-/** 大图安全转 data URL：不走 fromCharCode 展开，避免爆栈 */
 function bytesToDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
@@ -121,27 +166,49 @@ function bytesToDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
   return readBlobAsDataUrl(blob);
 }
 
-const TEXT_COLORS = [
-  { id: "default", color: "#d0d0d0", label: "默" },
-  { id: "white", color: "#ffffff", label: "白" },
-  { id: "red", color: "#e07070", label: "红" },
-  { id: "orange", color: "#e0a050", label: "橙" },
-  { id: "yellow", color: "#e0d060", label: "黄" },
-  { id: "green", color: "#70c090", label: "绿" },
-  { id: "blue", color: "#6a9ee0", label: "蓝" },
-  { id: "purple", color: "#b080e0", label: "紫" },
-];
-
-/** 高亮底色：要够亮，选中一点就看得出来 */
-const HIGHLIGHT_COLORS = [
-  { id: "none", color: "transparent", label: "无" },
-  { id: "yellow", color: "#f5d547", label: "黄" },
-  { id: "green", color: "#5ecf8a", label: "绿" },
-  { id: "blue", color: "#5aa8f0", label: "蓝" },
-  { id: "pink", color: "#f080a0", label: "粉" },
-  { id: "orange", color: "#f0a050", label: "橙" },
-  { id: "purple", color: "#c090f0", label: "紫" },
-];
+/** 居中裁切为 Notion 封面比例，输出 JPEG data URL */
+function cropCoverToNotion(src: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => {
+      try {
+        const iw = img.naturalWidth;
+        const ih = img.naturalHeight;
+        if (iw < 1 || ih < 1) {
+          reject(new Error("bad image"));
+          return;
+        }
+        const targetRatio = COVER_W / COVER_H;
+        const srcRatio = iw / ih;
+        let sx = 0;
+        let sy = 0;
+        let sw = iw;
+        let sh = ih;
+        if (srcRatio > targetRatio) {
+          sw = ih * targetRatio;
+          sx = (iw - sw) / 2;
+        } else {
+          sh = iw / targetRatio;
+          sy = (ih - sh) / 2;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = COVER_W;
+        canvas.height = COVER_H;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("no canvas"));
+          return;
+        }
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, COVER_W, COVER_H);
+        resolve(canvas.toDataURL("image/jpeg", 0.88));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error("load fail"));
+    img.src = src;
+  });
+}
 
 function formatTime(ts: number): string {
   try {
@@ -164,13 +231,92 @@ async function getNotesStore() {
   return load(NOTES_STORE, { autoSave: true });
 }
 
+/** 防止工具栏抢走选区（TipTap 文档：toolbar 必须 mousedown preventDefault） */
+function keepSel(e: React.MouseEvent) {
+  e.preventDefault();
+}
+
+/**
+ * 颜色/高亮/字号：必须有非空选区才执行。
+ * 空选区时 TipTap 会把 mark 存成「下一段输入样式」，容易让人以为「别的字也变了」。
+ * 官方命令本身只改选区；这里再挡一层，杜绝误触。
+ */
+function runOnSelection(editor: Editor | null, fn: (ed: Editor) => void) {
+  if (!editor) return;
+  const { empty } = editor.state.selection;
+  if (empty) return;
+  fn(editor);
+}
+
+/** 支持 #RGB / #RRGGBB / 不带 # */
+function normalizeHex(raw: string): string | null {
+  let s = raw.trim();
+  if (!s) return null;
+  if (!s.startsWith("#")) s = `#${s}`;
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+    const r = s[1];
+    const g = s[2];
+    const b = s[3];
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+  return null;
+}
+
+type Hsv = { h: number; s: number; v: number };
+
+function clamp01(n: number) {
+  return Math.min(1, Math.max(0, n));
+}
+
+function hexToHsv(hex: string): Hsv {
+  const n = normalizeHex(hex) || "#e07070";
+  const r = parseInt(n.slice(1, 3), 16) / 255;
+  const g = parseInt(n.slice(3, 5), 16) / 255;
+  const b = parseInt(n.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  const s = max === 0 ? 0 : d / max;
+  return { h: h * 360, s, v: max };
+}
+
+function hsvToHex(h: number, s: number, v: number): string {
+  const hh = ((h % 360) + 360) % 360;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((hh / 60) % 2) - 1));
+  const m = v - c;
+  let rp = 0;
+  let gp = 0;
+  let bp = 0;
+  if (hh < 60) [rp, gp, bp] = [c, x, 0];
+  else if (hh < 120) [rp, gp, bp] = [x, c, 0];
+  else if (hh < 180) [rp, gp, bp] = [0, c, x];
+  else if (hh < 240) [rp, gp, bp] = [0, x, c];
+  else if (hh < 300) [rp, gp, bp] = [x, 0, c];
+  else [rp, gp, bp] = [c, 0, x];
+  const to = (n: number) =>
+    Math.round((n + m) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${to(rp)}${to(gp)}${to(bp)}`;
+}
+
+function pureHueHex(h: number): string {
+  return hsvToHex(h, 1, 1);
+}
+
 export default function Notepad({
   embedded = false,
   onChromeChange,
 }: {
-  /** 由 App 统一顶栏时始终 true */
   embedded?: boolean;
-  /** 嵌入时把场景标题与工具上报到 App 唯一顶栏 */
   onChromeChange?: (chrome: ModuleChrome | null) => void;
 }) {
   const { t } = useI18n();
@@ -180,67 +326,50 @@ export default function Notepad({
   const [booting, setBooting] = useState(true);
   const [saveHint, setSaveHint] = useState("");
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
-  /** 默认中号，与工具栏 M 对齐 */
   const [fontSize, setFontSize] = useState(15);
   const [stats, setStats] = useState({ chars: 0, lines: 1 });
   const [emojiOpen, setEmojiOpen] = useState(false);
-  /** 左侧笔记列表展开 / 收起 */
+  /** 紧凑取色面板：色板+色相条+色值（portal 到 body） */
+  const [hexPick, setHexPick] = useState<null | "text" | "hl">(null);
+  const [hexDraft, setHexDraft] = useState("#e07070");
+  const [hsv, setHsv] = useState<Hsv>(() => hexToHsv("#e07070"));
+  const [hexPopPos, setHexPopPos] = useState({ left: 0, top: 0 });
   const [sideOpen, setSideOpen] = useState(true);
   const saveTimer = useRef<number | null>(null);
-  /** 尚未落盘的最新列表；离开模块时立刻冲刷，避免丢最后一次输入 */
   const dirtyListRef = useRef<Note[] | null>(null);
   const notesRef = useRef<Note[]>([]);
-  const bodyRef = useRef<HTMLDivElement | null>(null);
   const titleRef = useRef<HTMLInputElement | null>(null);
   const emojiWrapRef = useRef<HTMLDivElement | null>(null);
-  /** 点工具栏时先存选区，避免焦点一跳选区丢了高亮失效 */
-  const savedRangeRef = useRef<Range | null>(null);
+  const hexPickRef = useRef<HTMLDivElement | null>(null);
+  const hexTextBtnRef = useRef<HTMLButtonElement | null>(null);
+  const hexHlBtnRef = useRef<HTMLButtonElement | null>(null);
+  const svRef = useRef<HTMLDivElement | null>(null);
+  const hueRef = useRef<HTMLDivElement | null>(null);
+  const activeIdRef = useRef<string | null>(null);
+  const editorRef = useRef<Editor | null>(null);
+  /** 切换笔记时灌内容，避免 onUpdate 回写旧笔记 */
+  const suppressUpdate = useRef(false);
 
   useEffect(() => {
     notesRef.current = notes;
   }, [notes]);
-
-  const focusBody = () => bodyRef.current?.focus();
-
-  const syncStats = useCallback(() => {
-    const el = bodyRef.current;
-    const plain = el ? stripHtml(el.innerHTML) : "";
-    setStats({
-      chars: plain.length,
-      lines: plain.length === 0 ? 1 : plain.split(/\n/).length,
-    });
-  }, []);
-
   useEffect(() => {
-    // 切换笔记：灌入 HTML，不在每次输入时 reset（保护光标与撤销）
-    const el = bodyRef.current;
-    if (!el || !activeId) return;
-    const note = notesRef.current.find((n) => n.id === activeId);
-    if (!note) return;
-    const html = note.body.includes("<")
-      ? note.body
-      : note.body
-        ? note.body
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/\n/g, "<br>")
-        : "";
-    el.innerHTML = html;
-    const t = window.setTimeout(() => syncStats(), 0);
-    return () => window.clearTimeout(t);
-  }, [activeId, syncStats]);
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
-  const persist = useCallback(async (list: Note[]) => {
-    try {
-      const store = await getNotesStore();
-      await store.set(NOTES_KEY, list);
-      setSaveHint(t("saved"));
-      window.setTimeout(() => setSaveHint(""), 1200);
-    } catch {
-      setSaveHint(t("saveFail"));
-    }
-  }, [t]);
+  const persist = useCallback(
+    async (list: Note[]) => {
+      try {
+        const store = await getNotesStore();
+        await store.set(NOTES_KEY, list);
+        setSaveHint(t("saved"));
+        window.setTimeout(() => setSaveHint(""), 1200);
+      } catch {
+        setSaveHint(t("saveFail"));
+      }
+    },
+    [t],
+  );
 
   const schedulePersist = useCallback(
     (list: Note[]) => {
@@ -254,6 +383,111 @@ export default function Notepad({
     },
     [persist],
   );
+
+  const updateActive = useCallback(
+    (patch: Partial<Pick<Note, "title" | "body" | "cover">>) => {
+      const id = activeIdRef.current;
+      if (!id) return;
+      const next = notesRef.current.map((n) => {
+        if (n.id !== id) return n;
+        const merged: Note = { ...n, ...patch, updatedAt: Date.now() };
+        // cover 传空串表示去掉封面
+        if ("cover" in patch && !patch.cover) {
+          delete merged.cover;
+        }
+        return merged;
+      });
+      setNotes(next);
+      schedulePersist(next);
+    },
+    [schedulePersist],
+  );
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({
+        heading: false,
+        codeBlock: false,
+        blockquote: false,
+        horizontalRule: false,
+      }),
+      Underline,
+      // 官方 TextStyle + Color + FontSize（@tiptap/extension-text-style）
+      TextStyle,
+      Color,
+      FontSize,
+      Highlight.configure({ multicolor: true }),
+      Image.configure({
+        inline: false,
+        allowBase64: true,
+        HTMLAttributes: { class: "notepad-img" },
+      }),
+      Placeholder.configure({
+        placeholder: t("noteBody"),
+      }),
+    ],
+    content: "",
+    editorProps: {
+      attributes: {
+        class: "notepad-body notepad-rich notepad-tiptap",
+      },
+      handlePaste: (_view, event) => {
+        const items = event.clipboardData?.items;
+        if (!items) return false;
+        for (const item of Array.from(items)) {
+          if (item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (!file) continue;
+            event.preventDefault();
+            void readBlobAsDataUrl(file).then((url) => {
+              editorRef.current?.chain().focus().setImage({ src: url }).run();
+            });
+            return true;
+          }
+        }
+        return false;
+      },
+    },
+    onUpdate: ({ editor: ed }) => {
+      if (suppressUpdate.current) return;
+      const html = ed.getHTML();
+      const plain = ed.getText();
+      updateActive({ body: html });
+      setStats({
+        chars: plain.replace(/\s+/g, " ").trim().length,
+        lines: plain.length === 0 ? 1 : plain.split(/\n/).length,
+      });
+    },
+  });
+
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
+
+  // 切换笔记 → 灌入 HTML
+  useEffect(() => {
+    if (!editor || !activeId) return;
+    const note = notesRef.current.find((n) => n.id === activeId);
+    if (!note) return;
+    const html =
+      !note.body
+        ? ""
+        : note.body.includes("<")
+          ? note.body
+          : note.body
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/\n/g, "<br>");
+    suppressUpdate.current = true;
+    editor.commands.setContent(html || "<p></p>", { emitUpdate: false });
+    suppressUpdate.current = false;
+    const plain = editor.getText();
+    setStats({
+      chars: plain.replace(/\s+/g, " ").trim().length,
+      lines: plain.length === 0 ? 1 : plain.split(/\n/).length,
+    });
+  }, [activeId, editor]);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,7 +510,6 @@ export default function Notepad({
     };
   }, []);
 
-  // 切走 / 卸载时：取消定时器并立刻写入未保存内容
   useEffect(() => {
     return () => {
       if (saveTimer.current != null) {
@@ -291,6 +524,197 @@ export default function Notepad({
         .catch(() => undefined);
     };
   }, []);
+
+  useEffect(() => {
+    if (!emojiOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const wrap = emojiWrapRef.current;
+      if (wrap && !wrap.contains(e.target as Node)) setEmojiOpen(false);
+    };
+    window.addEventListener("mousedown", onDown, true);
+    return () => window.removeEventListener("mousedown", onDown, true);
+  }, [emojiOpen]);
+
+  const setColorFromHsv = (next: Hsv) => {
+    setHsv(next);
+    setHexDraft(hsvToHex(next.h, next.s, next.v));
+  };
+
+  const openHexPick = (mode: "text" | "hl", _btn: HTMLButtonElement | null) => {
+    const start = mode === "hl" ? "#f5d547" : "#e07070";
+    setHexDraft(start);
+    setHsv(hexToHsv(start));
+    setHexPick((v) => (v === mode ? null : mode));
+  };
+
+  const pickSv = (clientX: number, clientY: number) => {
+    const el = svRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const s = clamp01((clientX - r.left) / r.width);
+    const v = clamp01(1 - (clientY - r.top) / r.height);
+    setColorFromHsv({ ...hsv, s, v });
+  };
+
+  const pickHue = (clientX: number) => {
+    const el = hueRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const h = clamp01((clientX - r.left) / r.width) * 360;
+    setColorFromHsv({ ...hsv, h });
+  };
+
+  useLayoutEffect(() => {
+    if (!hexPick) return;
+    const btn = hexPick === "hl" ? hexHlBtnRef.current : hexTextBtnRef.current;
+    if (!btn) return;
+    const place = () => {
+      const r = btn.getBoundingClientRect();
+      const popW = 196;
+      const popH = 196;
+      let left = r.left + r.width / 2 - popW / 2;
+      let top = r.bottom + 8;
+      const pad = 8;
+      if (left < pad) left = pad;
+      if (left + popW > window.innerWidth - pad) left = window.innerWidth - pad - popW;
+      if (top + popH > window.innerHeight - pad) top = Math.max(pad, r.top - popH - 8);
+      setHexPopPos({ left, top });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [hexPick]);
+
+  useEffect(() => {
+    if (!hexPick) return;
+    const onDown = (e: MouseEvent) => {
+      const pop = hexPickRef.current;
+      const btn = hexPick === "hl" ? hexHlBtnRef.current : hexTextBtnRef.current;
+      const t = e.target as Node;
+      if (pop?.contains(t) || btn?.contains(t)) return;
+      setHexPick(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHexPick(null);
+    };
+    const id = window.setTimeout(() => {
+      window.addEventListener("mousedown", onDown, true);
+      window.addEventListener("keydown", onKey, true);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [hexPick]);
+
+  const applyHexColor = () => {
+    const hex = normalizeHex(hexDraft) || hsvToHex(hsv.h, hsv.s, hsv.v);
+    if (!hex) return;
+    runOnSelection(editor, (ed) => {
+      if (hexPick === "hl") {
+        ed.chain().focus().setHighlight({ color: hex }).run();
+      } else {
+        ed.chain().focus().setColor(hex).run();
+      }
+    });
+    setHexPick(null);
+  };
+
+  const liveHex = normalizeHex(hexDraft) || hsvToHex(hsv.h, hsv.s, hsv.v);
+
+  const hexPop =
+    hexPick &&
+    createPortal(
+      <div
+        ref={hexPickRef}
+        className="notepad-hex-pop"
+        role="dialog"
+        aria-label={hexPick === "hl" ? t("pickHighlight") : t("pickTextColor")}
+        style={{ left: hexPopPos.left, top: hexPopPos.top }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {/* 饱和度 / 明度 色板 */}
+        <div
+          ref={svRef}
+          className="notepad-sv"
+          style={{ backgroundColor: pureHueHex(hsv.h) }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            pickSv(e.clientX, e.clientY);
+            const move = (ev: MouseEvent) => pickSv(ev.clientX, ev.clientY);
+            const up = () => {
+              window.removeEventListener("mousemove", move);
+              window.removeEventListener("mouseup", up);
+            };
+            window.addEventListener("mousemove", move);
+            window.addEventListener("mouseup", up);
+          }}
+        >
+          <div className="notepad-sv-white" />
+          <div className="notepad-sv-black" />
+          <span
+            className="notepad-sv-knob"
+            style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }}
+          />
+        </div>
+        {/* 色相条 */}
+        <div
+          ref={hueRef}
+          className="notepad-hue"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            pickHue(e.clientX);
+            const move = (ev: MouseEvent) => pickHue(ev.clientX);
+            const up = () => {
+              window.removeEventListener("mousemove", move);
+              window.removeEventListener("mouseup", up);
+            };
+            window.addEventListener("mousemove", move);
+            window.addEventListener("mouseup", up);
+          }}
+        >
+          <span className="notepad-hue-knob" style={{ left: `${(hsv.h / 360) * 100}%` }} />
+        </div>
+        {/* 预览 + 色值 + 应用 */}
+        <div className="notepad-hex-row">
+          <span className="notepad-hex-swatch" style={{ background: liveHex }} />
+          <input
+            className="notepad-hex-input"
+            value={hexDraft}
+            placeholder="#RRGGBB"
+            spellCheck={false}
+            autoComplete="off"
+            maxLength={7}
+            onChange={(e) => {
+              const v = e.target.value;
+              setHexDraft(v);
+              const n = normalizeHex(v);
+              if (n) setHsv(hexToHsv(n));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                applyHexColor();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="notepad-hex-apply"
+            onMouseDown={keepSel}
+            onClick={applyHexColor}
+          >
+            {t("applyColor") || "应用"}
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -317,17 +741,6 @@ export default function Notepad({
     schedulePersist(next);
   };
 
-  const updateActive = (patch: Partial<Pick<Note, "title" | "body">>) => {
-    if (!activeId) return;
-    const next = notesRef.current.map((n) =>
-      n.id === activeId
-        ? { ...n, ...patch, updatedAt: Date.now() }
-        : n,
-    );
-    setNotes(next);
-    schedulePersist(next);
-  };
-
   const deleteNote = async (id: string) => {
     const ok = await ask(t("deleteNoteConfirm"), {
       title: t("delete"),
@@ -336,37 +749,8 @@ export default function Notepad({
     if (!ok) return;
     const next = notesRef.current.filter((n) => n.id !== id);
     setNotes(next);
-    if (activeId === id) {
-      setActiveId(next[0]?.id ?? null);
-    }
+    if (activeId === id) setActiveId(next[0]?.id ?? null);
     schedulePersist(next);
-  };
-
-  const noteMenu = (n: Note): CtxItem[] => [
-    {
-      id: "open",
-      label: t("open"),
-      onClick: () => setActiveId(n.id),
-    },
-    { id: "sep", separator: true },
-    {
-      id: "del",
-      label: t("delete"),
-      danger: true,
-      onClick: () => void deleteNote(n.id),
-    },
-  ];
-
-  /** 富文本 contenteditable：改完同步 HTML 到列表 */
-  const onBodyInput = () => {
-    const el = bodyRef.current;
-    if (!el || !activeId) return;
-    updateActive({ body: el.innerHTML });
-    const plain = stripHtml(el.innerHTML);
-    setStats({
-      chars: plain.length,
-      lines: plain.length === 0 ? 1 : plain.split(/\n/).length,
-    });
   };
 
   const onTitleInput = () => {
@@ -375,83 +759,13 @@ export default function Notepad({
     updateActive({ title: el.value });
   };
 
-  const captureSelection = (allowCollapsed = false) => {
-    const el = bodyRef.current;
-    const sel = window.getSelection();
-    if (!el || !sel || sel.rangeCount === 0) return;
-    const r = sel.getRangeAt(0);
-    if (!el.contains(r.commonAncestorContainer)) return;
-    if (r.collapsed && !allowCollapsed) return;
-    try {
-      savedRangeRef.current = r.cloneRange();
-    } catch {
-      savedRangeRef.current = null;
-    }
-  };
-
-  /** 恢复正文选区；失败则读当前选区。没有落在正文内的选区时返回 false（避免格式化整篇） */
-  const ensureBodySelection = (requireNonCollapsed = false): boolean => {
-    const el = bodyRef.current;
-    if (!el) return false;
-    if (restoreSelection()) {
-      const sel = window.getSelection();
-      if (sel && sel.rangeCount > 0) {
-        const r = sel.getRangeAt(0);
-        if (el.contains(r.commonAncestorContainer)) {
-          if (requireNonCollapsed && r.collapsed) return false;
-          return true;
-        }
-      }
-    }
-    captureSelection(!requireNonCollapsed);
-    if (!restoreSelection()) return false;
-    if (requireNonCollapsed) {
-      const sel = window.getSelection();
-      const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
-      if (!r || r.collapsed) return false;
-    }
-    return true;
-  };
-
-  /** 在光标处插入图片（data URL），支持粘贴 / 加号选图 */
-  const insertImageDataUrl = (dataUrl: string) => {
-    const el = bodyRef.current;
-    if (!el || !dataUrl.startsWith("data:image")) return;
-    el.focus();
-    restoreSelection();
-    const img = document.createElement("img");
-    img.src = dataUrl;
-    img.className = "notepad-img";
-    img.alt = "";
-    img.draggable = false;
-
-    const sel = window.getSelection();
-    try {
-      if (sel && sel.rangeCount > 0) {
-        const range = sel.getRangeAt(0);
-        if (el.contains(range.commonAncestorContainer)) {
-          range.deleteContents();
-          range.insertNode(img);
-          // 光标挪到图后，方便继续写
-          range.setStartAfter(img);
-          range.collapse(true);
-          sel.removeAllRanges();
-          sel.addRange(range);
-          savedRangeRef.current = range.cloneRange();
-        } else {
-          el.appendChild(img);
-        }
-      } else {
-        el.appendChild(img);
-      }
-    } catch {
-      el.appendChild(img);
-    }
-    onBodyInput();
+  const run = (fn: () => void) => {
+    if (!editor) return;
+    fn();
   };
 
   const addImageFromPicker = async () => {
-    captureSelection(true);
+    if (!editor) return;
     try {
       const selected = await openDialog({
         multiple: true,
@@ -465,300 +779,50 @@ export default function Notepad({
       });
       if (!selected) return;
       const paths = Array.isArray(selected) ? selected : [selected];
-      let added = 0;
       for (const path of paths) {
         if (typeof path !== "string" || !path) continue;
         const bytes = await readFile(path);
         const url = await bytesToDataUrl(bytes, mimeFromPath(path));
-        insertImageDataUrl(url);
-        added += 1;
+        editor.chain().focus().setImage({ src: url }).run();
       }
-      if (added === 0) return;
     } catch {
       window.alert(t("addImageFail"));
     }
   };
 
-  const onBodyPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
-    const cd = e.clipboardData;
-    if (!cd) return;
+  /** 上传 / 更换封面：Notion 比例居中裁切 */
+  const setCoverFromPicker = async () => {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        title: t("pickCover"),
+        filters: [
+          {
+            name: t("pickCover"),
+            extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "jfif"],
+          },
+        ],
+      });
+      if (!selected || typeof selected !== "string") return;
+      const bytes = await readFile(selected);
+      const raw = await bytesToDataUrl(bytes, mimeFromPath(selected));
+      const cover = await cropCoverToNotion(raw);
+      updateActive({ cover });
+    } catch {
+      window.alert(t("addImageFail"));
+    }
+  };
 
-    const imageFiles: File[] = [];
-    if (cd.files && cd.files.length > 0) {
-      for (const f of Array.from(cd.files)) {
-        if (f.type.startsWith("image/")) imageFiles.push(f);
-      }
-    }
-    if (imageFiles.length === 0 && cd.items) {
-      for (const item of Array.from(cd.items)) {
-        if (item.kind === "file" && item.type.startsWith("image/")) {
-          const f = item.getAsFile();
-          if (f) imageFiles.push(f);
-        }
-      }
-    }
-    if (imageFiles.length === 0) return; // 文字/表情走默认粘贴
-
-    e.preventDefault();
-    captureSelection(true);
-    for (const f of imageFiles) {
-      try {
-        const url = await readBlobAsDataUrl(f);
-        insertImageDataUrl(url);
-      } catch {
-        /* skip bad file */
-      }
-    }
+  const removeCover = () => {
+    updateActive({ cover: "" });
   };
 
   const insertEmoji = (emoji: string) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    el.focus();
-    restoreSelection();
-    try {
-      const ok = document.execCommand("insertText", false, emoji);
-      if (!ok) {
-        const sel = window.getSelection();
-        if (sel && sel.rangeCount > 0) {
-          const range = sel.getRangeAt(0);
-          range.deleteContents();
-          const node = document.createTextNode(emoji);
-          range.insertNode(node);
-          range.setStartAfter(node);
-          range.collapse(true);
-          sel.removeAllRanges();
-          sel.addRange(range);
-          savedRangeRef.current = range.cloneRange();
-        } else {
-          el.appendChild(document.createTextNode(emoji));
-        }
-      } else {
-        captureSelection(true);
-      }
-    } catch {
-      el.appendChild(document.createTextNode(emoji));
-    }
-    onBodyInput();
+    editor?.chain().focus().insertContent(emoji).run();
     setEmojiOpen(false);
   };
 
-  // 点面板外关闭表情
-  useEffect(() => {
-    if (!emojiOpen) return;
-    const onDown = (e: MouseEvent) => {
-      const wrap = emojiWrapRef.current;
-      if (wrap && !wrap.contains(e.target as Node)) setEmojiOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setEmojiOpen(false);
-    };
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [emojiOpen]);
-
-  const restoreSelection = (): boolean => {
-    const el = bodyRef.current;
-    const range = savedRangeRef.current;
-    if (!el || !range) return false;
-    try {
-      el.focus();
-      const sel = window.getSelection();
-      if (!sel) return false;
-      sel.removeAllRanges();
-      sel.addRange(range);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const runCmd = (cmd: string, value?: string) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    // 撤销/重做/全选不依赖选区；其它格式命令没有正文选区时禁止执行（否则会改整篇）
-    const free =
-      cmd === "undo" ||
-      cmd === "redo" ||
-      cmd === "selectAll" ||
-      cmd === "styleWithCSS";
-    if (!free && !ensureBodySelection(false)) return;
-    el.focus();
-    try {
-      document.execCommand(cmd, false, value);
-    } catch {
-      /* ignore */
-    }
-    captureSelection(true);
-    onBodyInput();
-  };
-
-  const runEdit = async (
-    action: "undo" | "redo" | "cut" | "copy" | "paste" | "selectAll" | "bold" | "italic" | "underline",
-  ) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    if (action !== "undo" && action !== "redo" && action !== "selectAll") {
-      if (!ensureBodySelection(false)) return;
-    } else {
-      el.focus();
-    }
-    if (action === "paste") {
-      try {
-        const text = await readText();
-        document.execCommand("insertText", false, text);
-        onBodyInput();
-      } catch {
-        try {
-          document.execCommand("paste");
-          onBodyInput();
-        } catch {
-          /* ignore */
-        }
-      }
-      return;
-    }
-    runCmd(action);
-  };
-
-  /** 只给当前选中文字包颜色 span；禁止无选区时 execCommand 污染全文 */
-  const wrapSelectionColor = (color: string): boolean => {
-    const range = savedRangeRef.current;
-    if (!range || range.collapsed) return false;
-    try {
-      const live = range.cloneRange();
-      const span = document.createElement("span");
-      span.style.color = color;
-      try {
-        live.surroundContents(span);
-      } catch {
-        const frag = live.extractContents();
-        span.appendChild(frag);
-        live.insertNode(span);
-      }
-      const sel = window.getSelection();
-      if (sel) {
-        const nr = document.createRange();
-        nr.selectNodeContents(span);
-        sel.removeAllRanges();
-        sel.addRange(nr);
-        savedRangeRef.current = nr.cloneRange();
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const applyColor = (color: string) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    // 必须有选中文字，否则不改（避免整篇变色）
-    if (!ensureBodySelection(true)) return;
-    el.focus();
-    // 一次改完再保存，中间不要 onBodyInput（重渲染会弄丢选区，导致第二次命令打到全文）
-    if (!wrapSelectionColor(color)) {
-      try {
-        document.execCommand("styleWithCSS", false, "true");
-        document.execCommand("foreColor", false, color);
-      } catch {
-        /* ignore */
-      }
-    }
-    captureSelection(true);
-    onBodyInput();
-  };
-
-  /** 用 span 包一层：execCommand 在 WebView 里偶发失效 */
-  const wrapSelectionHighlight = (color: string) => {
-    const range = savedRangeRef.current;
-    if (!range || range.collapsed) return false;
-    try {
-      if (color === "transparent") {
-        restoreSelection();
-        document.execCommand("styleWithCSS", false, "true");
-        document.execCommand("hiliteColor", false, "transparent");
-        document.execCommand("backColor", false, "transparent");
-        return true;
-      }
-      const live = range.cloneRange();
-      const span = document.createElement("span");
-      span.setAttribute("data-hl", "1");
-      span.style.backgroundColor = color;
-      span.style.color = "#111111";
-      span.style.borderRadius = "2px";
-      span.style.padding = "0 2px";
-      try {
-        live.surroundContents(span);
-      } catch {
-        const frag = live.extractContents();
-        span.appendChild(frag);
-        live.insertNode(span);
-      }
-      const sel = window.getSelection();
-      if (sel) {
-        const nr = document.createRange();
-        nr.selectNodeContents(span);
-        sel.removeAllRanges();
-        sel.addRange(nr);
-        savedRangeRef.current = nr.cloneRange();
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  /** 选中文字加背景高亮；transparent = 取消高亮 */
-  const applyHighlight = (color: string) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    // 高亮必须有选中段，禁止无选区时改整篇
-    if (!ensureBodySelection(true)) return;
-    el.focus();
-    if (color === "transparent") {
-      try {
-        document.execCommand("styleWithCSS", false, "true");
-        document.execCommand("hiliteColor", false, "transparent");
-        document.execCommand("backColor", false, "transparent");
-      } catch {
-        /* ignore */
-      }
-      try {
-        const sel = window.getSelection();
-        if (sel && sel.rangeCount > 0) {
-          let node: Node | null = sel.getRangeAt(0).commonAncestorContainer;
-          if (node.nodeType === 3) node = node.parentNode;
-          const hl = (node as HTMLElement | null)?.closest?.("span[data-hl='1']");
-          if (hl && hl.parentNode) {
-            while (hl.firstChild) hl.parentNode.insertBefore(hl.firstChild, hl);
-            hl.parentNode.removeChild(hl);
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-    } else if (!wrapSelectionHighlight(color)) {
-      try {
-        document.execCommand("styleWithCSS", false, "true");
-        document.execCommand("hiliteColor", false, color);
-        document.execCommand("backColor", false, color);
-      } catch {
-        /* ignore */
-      }
-    }
-    captureSelection(true);
-    onBodyInput();
-  };
-
   const insertDateTime = () => {
-    const el = bodyRef.current;
-    if (!el) return;
-    el.focus();
     const stamp = new Date().toLocaleString("zh-CN", {
       year: "numeric",
       month: "2-digit",
@@ -766,37 +830,72 @@ export default function Notepad({
       hour: "2-digit",
       minute: "2-digit",
     });
-    document.execCommand("insertText", false, stamp);
-    onBodyInput();
+    editor?.chain().focus().insertContent(stamp).run();
   };
 
-  const editorMenu = (): CtxItem[] => [
-    { id: "bold", label: t("bold") || "加粗", onClick: () => void runEdit("bold") },
-    { id: "italic", label: t("italic") || "斜体", onClick: () => void runEdit("italic") },
-    { id: "underline", label: t("underline") || "下划线", onClick: () => void runEdit("underline") },
-    { id: "sep0", separator: true },
-    { id: "undo", label: t("undo"), onClick: () => void runEdit("undo") },
-    { id: "redo", label: t("redo"), onClick: () => void runEdit("redo") },
-    { id: "sep1", separator: true },
-    { id: "cut", label: t("cut"), onClick: () => void runEdit("cut") },
-    { id: "copy", label: t("copy"), onClick: () => void runEdit("copy") },
-    { id: "paste", label: t("paste"), onClick: () => void runEdit("paste") },
-    { id: "sep2", separator: true },
-    { id: "all", label: t("selectAll"), onClick: () => void runEdit("selectAll") },
-    { id: "time", label: t("insertDateTime"), onClick: () => insertDateTime() },
+  const pasteText = async () => {
+    if (!editor) return;
+    try {
+      const text = await readText();
+      editor.chain().focus().insertContent(text).run();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const noteMenu = (n: Note): CtxItem[] => [
+    { id: "open", label: t("open"), onClick: () => setActiveId(n.id) },
+    { id: "sep", separator: true },
+    {
+      id: "del",
+      label: t("delete"),
+      danger: true,
+      onClick: () => void deleteNote(n.id),
+    },
   ];
 
-  // 顶栏只放全局（语言/窗控）；新建/删除放列表区，不占顶栏
+  const editorMenu = (): CtxItem[] => [
+    {
+      id: "bold",
+      label: t("bold") || "加粗",
+      onClick: () => run(() => editor!.chain().focus().toggleBold().run()),
+    },
+    {
+      id: "italic",
+      label: t("italic") || "斜体",
+      onClick: () => run(() => editor!.chain().focus().toggleItalic().run()),
+    },
+    {
+      id: "underline",
+      label: t("underline") || "下划线",
+      onClick: () => run(() => editor!.chain().focus().toggleUnderline().run()),
+    },
+    { id: "sep0", separator: true },
+    {
+      id: "undo",
+      label: t("undo"),
+      onClick: () => run(() => editor!.chain().focus().undo().run()),
+    },
+    {
+      id: "redo",
+      label: t("redo"),
+      onClick: () => run(() => editor!.chain().focus().redo().run()),
+    },
+    { id: "sep1", separator: true },
+    {
+      id: "time",
+      label: t("insertDateTime"),
+      onClick: () => insertDateTime(),
+    },
+  ];
+
   useEffect(() => {
     if (!embedded || !onChromeChange) return;
     if (booting) {
       onChromeChange(null);
       return;
     }
-    const meta = [
-      `${notes.length} ${t("notesCount")}`,
-      saveHint || null,
-    ]
+    const meta = [`${notes.length} ${t("notesCount")}`, saveHint || null]
       .filter(Boolean)
       .join(" · ");
     onChromeChange({ meta });
@@ -820,7 +919,6 @@ export default function Notepad({
   return (
     <div className="notepad-embedded">
       <div className={sideOpen ? "notepad" : "notepad side-collapsed"}>
-        {/* 收起时彻底隐藏，不留细条；展开/收起只在右侧工具栏 */}
         {sideOpen ? (
           <aside className="notepad-side">
             <div className="notepad-search">
@@ -841,7 +939,7 @@ export default function Notepad({
                     type="button"
                     className="icon-btn danger"
                     title={t("deleteNote")}
-                    onClick={() => deleteNote(active.id)}
+                    onClick={() => void deleteNote(active.id)}
                   >
                     <Trash2 size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
                   </button>
@@ -879,7 +977,6 @@ export default function Notepad({
         ) : null}
 
         <section className="notepad-main">
-          {/* 工具栏始终有侧栏开关；收起后只靠这里展开 */}
           <div className="notepad-toolbar">
             <button
               type="button"
@@ -893,18 +990,15 @@ export default function Notepad({
                 <PanelLeft size={15} strokeWidth={1.75} absoluteStrokeWidth />
               )}
             </button>
-            {active ? (
+            {active && editor ? (
               <>
                 <span className="notepad-tool-sep" />
                 <button
                   type="button"
                   className="notepad-tool icon-only"
                   title={`${t("undo")} Ctrl+Z`}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("undo")}
+                  onMouseDown={keepSel}
+                  onClick={() => editor.chain().focus().undo().run()}
                 >
                   <Undo2 size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
@@ -912,11 +1006,8 @@ export default function Notepad({
                   type="button"
                   className="notepad-tool icon-only"
                   title={`${t("redo")} Ctrl+Y`}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("redo")}
+                  onMouseDown={keepSel}
+                  onClick={() => editor.chain().focus().redo().run()}
                 >
                   <Redo2 size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
@@ -925,11 +1016,10 @@ export default function Notepad({
                   type="button"
                   className="notepad-tool icon-only"
                   title={t("cut")}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
+                  onMouseDown={keepSel}
+                  onClick={() => {
+                    document.execCommand("cut");
                   }}
-                  onClick={() => void runEdit("cut")}
                 >
                   <Scissors size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
@@ -937,11 +1027,10 @@ export default function Notepad({
                   type="button"
                   className="notepad-tool icon-only"
                   title={t("copy")}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
+                  onMouseDown={keepSel}
+                  onClick={() => {
+                    document.execCommand("copy");
                   }}
-                  onClick={() => void runEdit("copy")}
                 >
                   <Copy size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
@@ -949,72 +1038,99 @@ export default function Notepad({
                   type="button"
                   className="notepad-tool icon-only"
                   title={t("paste")}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("paste")}
+                  onMouseDown={keepSel}
+                  onClick={() => void pasteText()}
                 >
                   <ClipboardPaste size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
                 <span className="notepad-tool-sep" />
                 <button
                   type="button"
-                  className="notepad-tool icon-only"
+                  className={
+                    editor.isActive("bold")
+                      ? "notepad-tool icon-only on"
+                      : "notepad-tool icon-only"
+                  }
                   title={t("bold") || "加粗"}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("bold")}
+                  onMouseDown={keepSel}
+                  onClick={() => editor.chain().focus().toggleBold().run()}
                 >
                   <Bold size={15} strokeWidth={2} absoluteStrokeWidth />
                 </button>
                 <button
                   type="button"
-                  className="notepad-tool icon-only"
+                  className={
+                    editor.isActive("italic")
+                      ? "notepad-tool icon-only on"
+                      : "notepad-tool icon-only"
+                  }
                   title={t("italic") || "斜体"}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("italic")}
+                  onMouseDown={keepSel}
+                  onClick={() => editor.chain().focus().toggleItalic().run()}
                 >
                   <Italic size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
                 <button
                   type="button"
-                  className="notepad-tool icon-only"
+                  className={
+                    editor.isActive("underline")
+                      ? "notepad-tool icon-only on"
+                      : "notepad-tool icon-only"
+                  }
                   title={t("underline") || "下划线"}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("underline")}
+                  onMouseDown={keepSel}
+                  onClick={() => editor.chain().focus().toggleUnderline().run()}
                 >
-                  <Underline size={15} strokeWidth={1.75} absoluteStrokeWidth />
+                  <UnderlineIcon size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
                 <span className="notepad-tool-sep" />
                 <span className="notepad-colors" title={t("textColor") || "文字颜色"}>
-                  <Type size={12} strokeWidth={1.75} absoluteStrokeWidth className="notepad-colors-icon" aria-hidden />
+                  <Type
+                    size={12}
+                    strokeWidth={1.75}
+                    absoluteStrokeWidth
+                    className="notepad-colors-icon"
+                    aria-hidden
+                  />
                   {TEXT_COLORS.map((c) => (
                     <button
                       key={c.id}
                       type="button"
-                      className="notepad-color-dot"
-                      style={{ background: c.color }}
+                      className={
+                        c.id === "default"
+                          ? "notepad-color-dot text-default"
+                          : "notepad-color-dot"
+                      }
+                      style={c.id === "default" ? undefined : { background: c.color }}
                       title={`${t("textColor") || "文字"} · ${c.label}`}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        captureSelection();
+                      onMouseDown={keepSel}
+                      onClick={() => {
+                        // 只改选中文字（官方 setColor/unsetColor 作用在当前选区）
+                        runOnSelection(editor, (ed) => {
+                          if (!c.color) ed.chain().focus().unsetColor().run();
+                          else ed.chain().focus().setColor(c.color).run();
+                        });
                       }}
-                      onClick={() => applyColor(c.color)}
                     />
                   ))}
+                  <button
+                    ref={hexTextBtnRef}
+                    type="button"
+                    className="notepad-color-pick"
+                    title={t("pickTextColor") || "自己选文字颜色"}
+                    onMouseDown={keepSel}
+                    onClick={(e) => openHexPick("text", e.currentTarget)}
+                  />
                 </span>
                 <span className="notepad-tool-sep" />
                 <span className="notepad-colors" title={t("highlight") || "高亮"}>
-                  <Highlighter size={12} strokeWidth={1.75} absoluteStrokeWidth className="notepad-colors-icon" aria-hidden />
+                  <Highlighter
+                    size={12}
+                    strokeWidth={1.75}
+                    absoluteStrokeWidth
+                    className="notepad-colors-icon"
+                    aria-hidden
+                  />
                   {HIGHLIGHT_COLORS.map((c) => (
                     <button
                       key={c.id}
@@ -1030,24 +1146,32 @@ export default function Notepad({
                           ? t("clearHighlight") || "取消高亮"
                           : `${t("highlight") || "高亮"} · ${c.label}`
                       }
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        captureSelection();
+                      onMouseDown={keepSel}
+                      onClick={() => {
+                        // 用 setHighlight 不用 toggle，避免误伤其它已高亮段落
+                        runOnSelection(editor, (ed) => {
+                          if (!c.color) ed.chain().focus().unsetHighlight().run();
+                          else ed.chain().focus().setHighlight({ color: c.color }).run();
+                        });
                       }}
-                      onClick={() => applyHighlight(c.color)}
                     />
                   ))}
+                  <button
+                    ref={hexHlBtnRef}
+                    type="button"
+                    className="notepad-color-pick hl"
+                    title={t("pickHighlight") || "自己选高亮颜色"}
+                    onMouseDown={keepSel}
+                    onClick={(e) => openHexPick("hl", e.currentTarget)}
+                  />
                 </span>
                 <span className="notepad-tool-sep" />
                 <button
                   type="button"
                   className="notepad-tool icon-only"
                   title={t("selectAll")}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection();
-                  }}
-                  onClick={() => void runEdit("selectAll")}
+                  onMouseDown={keepSel}
+                  onClick={() => editor.chain().focus().selectAll().run()}
                 >
                   <TextSelect size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
@@ -1055,10 +1179,7 @@ export default function Notepad({
                   type="button"
                   className="notepad-tool icon-only"
                   title={t("insertDateTime")}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection(true);
-                  }}
+                  onMouseDown={keepSel}
                   onClick={insertDateTime}
                 >
                   <CalendarDays size={15} strokeWidth={1.75} absoluteStrokeWidth />
@@ -1067,39 +1188,49 @@ export default function Notepad({
                   type="button"
                   className="notepad-tool icon-only"
                   title={t("addImage")}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    captureSelection(true);
-                  }}
+                  onMouseDown={keepSel}
                   onClick={() => void addImageFromPicker()}
                 >
                   <ImagePlus size={15} strokeWidth={1.75} absoluteStrokeWidth />
                 </button>
+                <button
+                  type="button"
+                  className={
+                    active.cover
+                      ? "notepad-tool icon-only on"
+                      : "notepad-tool icon-only"
+                  }
+                  title={active.cover ? t("changeCover") : t("addCover")}
+                  onMouseDown={keepSel}
+                  onClick={() => void setCoverFromPicker()}
+                >
+                  <PanelTop size={15} strokeWidth={1.75} absoluteStrokeWidth />
+                </button>
                 <div className="notepad-emoji-wrap" ref={emojiWrapRef}>
                   <button
                     type="button"
-                    className={emojiOpen ? "notepad-tool icon-only on" : "notepad-tool icon-only"}
+                    className={
+                      emojiOpen ? "notepad-tool icon-only on" : "notepad-tool icon-only"
+                    }
                     title={t("insertEmoji")}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      captureSelection(true);
-                    }}
+                    onMouseDown={keepSel}
                     onClick={() => setEmojiOpen((v) => !v)}
                   >
                     <Smile size={15} strokeWidth={1.75} absoluteStrokeWidth />
                   </button>
                   {emojiOpen ? (
-                    <div className="notepad-emoji-panel" role="listbox" aria-label={t("insertEmoji")}>
+                    <div
+                      className="notepad-emoji-panel"
+                      role="listbox"
+                      aria-label={t("insertEmoji")}
+                    >
                       {EMOJIS.map((em) => (
                         <button
                           key={em}
                           type="button"
                           className="notepad-emoji-btn"
                           title={em}
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            captureSelection(true);
-                          }}
+                          onMouseDown={keepSel}
                           onClick={() => insertEmoji(em)}
                         >
                           {em}
@@ -1109,59 +1240,67 @@ export default function Notepad({
                   ) : null}
                 </div>
                 <span className="notepad-tool-sep" />
-                <button
-                  type="button"
-                  className={fontSize <= 13 ? "notepad-tool size-letter on" : "notepad-tool size-letter"}
-                  title={t("fontS")}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    setFontSize(13);
-                    focusBody();
-                  }}
-                >
-                  S
-                </button>
-                <button
-                  type="button"
-                  className={fontSize === 15 ? "notepad-tool size-letter on" : "notepad-tool size-letter"}
-                  title={t("fontM")}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    setFontSize(15);
-                    focusBody();
-                  }}
-                >
-                  M
-                </button>
-                <button
-                  type="button"
-                  className={fontSize === 18 ? "notepad-tool size-letter on" : "notepad-tool size-letter"}
-                  title={t("fontL")}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    setFontSize(18);
-                    focusBody();
-                  }}
-                >
-                  L
-                </button>
-                <button
-                  type="button"
-                  className={fontSize >= 22 ? "notepad-tool size-letter xl on" : "notepad-tool size-letter xl"}
-                  title={t("fontXL")}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    setFontSize(24);
-                    focusBody();
-                  }}
-                >
-                  XL
-                </button>
+                {FONT_SIZES.map((fs) => (
+                  <button
+                    key={fs.id}
+                    type="button"
+                    className={
+                      fontSize === fs.px
+                        ? fs.id === "XL"
+                          ? "notepad-tool size-letter xl on"
+                          : "notepad-tool size-letter on"
+                        : fs.id === "XL"
+                          ? "notepad-tool size-letter xl"
+                          : "notepad-tool size-letter"
+                    }
+                    title={
+                      fs.id === "S"
+                        ? t("fontS")
+                        : fs.id === "M"
+                          ? t("fontM")
+                          : fs.id === "L"
+                            ? t("fontL")
+                            : t("fontXL")
+                    }
+                    onMouseDown={keepSel}
+                    onClick={() => {
+                      setFontSize(fs.px);
+                      // 官方 FontSize：只给选中文字设绝对 px
+                      runOnSelection(editor, (ed) => {
+                        ed.chain().focus().setFontSize(`${fs.px}px`).run();
+                      });
+                    }}
+                  >
+                    {fs.id}
+                  </button>
+                ))}
               </>
             ) : null}
           </div>
           {active ? (
             <>
+              {active.cover ? (
+                <div className="notepad-cover">
+                  <img src={active.cover} alt="" draggable={false} />
+                  <div className="notepad-cover-actions">
+                    <button
+                      type="button"
+                      className="notepad-cover-btn"
+                      onClick={() => void setCoverFromPicker()}
+                    >
+                      {t("changeCover")}
+                    </button>
+                    <button
+                      type="button"
+                      className="notepad-cover-btn"
+                      title={t("removeCover")}
+                      onClick={removeCover}
+                    >
+                      <X size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <input
                 key={`t-${active.id}`}
                 ref={titleRef}
@@ -1173,20 +1312,14 @@ export default function Notepad({
                 autoComplete="off"
               />
               <div
-                key={`b-${active.id}`}
-                ref={bodyRef}
-                className="notepad-body notepad-rich"
-                contentEditable
-                suppressContentEditableWarning
-                data-placeholder={t("noteBody")}
-                onInput={onBodyInput}
-                onPaste={(e) => void onBodyPaste(e)}
-                onMouseUp={() => captureSelection()}
-                onKeyUp={() => captureSelection(true)}
-                onContextMenu={(e) => openCtxMenu(e, editorMenu(), setCtxMenu)}
-                spellCheck={false}
-                style={{ fontSize: fontSize }}
-              />
+                className="notepad-editor-wrap"
+                onContextMenu={(e) => {
+                  if (!editor) return;
+                  openCtxMenu(e, editorMenu(), setCtxMenu);
+                }}
+              >
+                <EditorContent editor={editor} />
+              </div>
               <div className="notepad-status">
                 <span>
                   {stats.chars} {t("chars")} · {stats.lines} {t("lines")}
@@ -1198,15 +1331,19 @@ export default function Notepad({
             <div className="notepad-blank">
               <FileText size={40} strokeWidth={1.25} color="#444" absoluteStrokeWidth />
               <p>{t("pickOrNew")}</p>
-              <button type="button" className="passbox-primary notepad-blank-btn" onClick={createNote}>
+              <button
+                type="button"
+                className="passbox-primary notepad-blank-btn"
+                onClick={createNote}
+              >
                 {t("newNote")}
               </button>
             </div>
           )}
         </section>
       </div>
-
       <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
+      {hexPop}
     </div>
   );
 }

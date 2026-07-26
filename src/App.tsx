@@ -555,12 +555,17 @@ export default function App() {
         thumbUrlCache.delete(entry.path);
         setImages((prev) => {
           const next = prev.filter((x) => x.path !== entry.path);
-          if (next.length === 0) closeLightbox();
-          else {
-            setActiveIndex(Math.min(index, next.length - 1));
-            setZoom(1);
-            setPan({ x: 0, y: 0 });
-          }
+          setActiveIndex((cur) => {
+            // 网格里删图：本来没放大，就别弹大图
+            if (cur == null) return null;
+            if (next.length === 0) return null;
+            // 正在看大图：删的是当前/前面，修正下标
+            if (index < cur) return cur - 1;
+            if (index === cur) return Math.min(index, next.length - 1);
+            return cur;
+          });
+          setZoom(1);
+          setPan({ x: 0, y: 0 });
           return next;
         });
         showToast(t("deleted"));
@@ -568,7 +573,7 @@ export default function App() {
         showToast(`${t("deleteFail")}：${e}`);
       }
     },
-    [closeLightbox, showToast, t],
+    [showToast, t],
   );
 
   const setMode = (mode: ViewMode) => {

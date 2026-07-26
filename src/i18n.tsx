@@ -100,6 +100,10 @@ const zh: Dict = {
   italic: "斜体",
   underline: "下划线",
   textColor: "文字颜色",
+  pickTextColor: "自己选文字颜色",
+  pickHighlight: "自己选高亮颜色",
+  hexColor: "色值 #RRGGBB",
+  applyColor: "应用",
   highlight: "高亮",
   clearHighlight: "取消高亮",
 
@@ -174,6 +178,10 @@ const zh: Dict = {
   addedImages: "已添加图片",
   addImageFail: "添加图片失败",
   pickImages: "选择图片",
+  addCover: "封面",
+  changeCover: "更换封面",
+  removeCover: "移除封面",
+  pickCover: "选择封面图片",
   nothingCopy: "没有可复制的内容",
   copied: "已复制",
 };
@@ -263,6 +271,10 @@ const en: Dict = {
   italic: "Italic",
   underline: "Underline",
   textColor: "Text color",
+  pickTextColor: "Custom text color",
+  pickHighlight: "Custom highlight color",
+  hexColor: "Hex #RRGGBB",
+  applyColor: "Apply",
   highlight: "Highlight",
   clearHighlight: "Clear highlight",
 
@@ -336,6 +348,10 @@ const en: Dict = {
   addedImages: "Images added",
   addImageFail: "Failed to add image",
   pickImages: "Choose images",
+  addCover: "Cover",
+  changeCover: "Change cover",
+  removeCover: "Remove cover",
+  pickCover: "Choose cover image",
   nothingCopy: "Nothing to copy",
   copied: "Copied",
 };
