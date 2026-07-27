@@ -27,3 +27,6 @@ dist-ssr
 src-tauri/target
 *.exe
 
+# FFmpeg 体积过大，本机放在 vendor/ffmpeg，不进仓库
+src-tauri/vendor/ffmpeg/
+

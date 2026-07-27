@@ -20,7 +20,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 type Props = {
   open: boolean;
   onClose: () => void;
-  anchor: DOMRect | null;
   settings: AppSettings;
   onChange: (next: AppSettings) => void;
   autostart: boolean;
@@ -64,7 +63,6 @@ function SwitchRow({
 export default function SettingsPopover({
   open,
   onClose,
-  anchor,
   settings,
   onChange,
   autostart,
@@ -80,22 +78,8 @@ export default function SettingsPopover({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    // 用 click 捕获：点弹窗外（含整条顶栏）即关；Logo 自己负责开关，这里跳过避免「先关再开」
-    const onClickCapture = (e: MouseEvent) => {
-      const el = panelRef.current;
-      if (!el) return;
-      const t = e.target;
-      if (!(t instanceof Node)) return;
-      if (el.contains(t)) return;
-      if (t instanceof Element && t.closest(".logo-btn")) return;
-      onClose();
-    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("click", onClickCapture, true);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("click", onClickCapture, true);
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
   const patch = useCallback(
@@ -105,94 +89,99 @@ export default function SettingsPopover({
     [onChange, settings],
   );
 
-  if (!open || !anchor) return null;
-
-  const top = Math.min(anchor.bottom + 8, window.innerHeight - 24);
-  const left = Math.max(12, Math.min(anchor.left, window.innerWidth - 320 - 12));
+  if (!open) return null;
 
   return createPortal(
     <div
-      ref={panelRef}
-      className="settings-pop"
-      role="dialog"
-      aria-label={t("settingsTitle")}
-      style={{ top, left }}
+      className="settings-mask"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
     >
-      <div className="settings-pop-title">{t("settingsTitle")}</div>
+      <div
+        ref={panelRef}
+        className="settings-pop"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("settingsTitle")}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="settings-pop-title">{t("settingsTitle")}</div>
 
-      <div className="settings-section">
-        <SwitchRow
-          label={t("settingsAutostart")}
-          hint={t("settingsAutostartHint")}
-          on={autostart}
-          disabled={autostartBusy}
-          onToggle={() => void onAutostartChange(!autostart)}
-        />
-        <SwitchRow
-          label={t("settingsRestoreVault")}
-          hint={t("settingsRestoreVaultHint")}
-          on={settings.restoreVault}
-          onToggle={() => patch({ restoreVault: !settings.restoreVault })}
-        />
-        <SwitchRow
-          label={t("settingsDeepDefault")}
-          hint={t("settingsDeepDefaultHint")}
-          on={settings.deepScanDefault}
-          onToggle={() => patch({ deepScanDefault: !settings.deepScanDefault })}
-        />
-        <SwitchRow
-          label={t("settingsStartMin")}
-          hint={t("settingsStartMinHint")}
-          on={settings.startMinimized}
-          onToggle={() => patch({ startMinimized: !settings.startMinimized })}
-        />
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-label">{t("settingsTheme")}</div>
-        <div className="settings-seg">
-          <button
-            type="button"
-            className={theme === "dark" ? "settings-seg-btn on" : "settings-seg-btn"}
-            onClick={() => setTheme("dark" as ThemeMode)}
-          >
-            {t("settingsThemeDark")}
-          </button>
-          <button
-            type="button"
-            className={theme === "light" ? "settings-seg-btn on" : "settings-seg-btn"}
-            onClick={() => setTheme("light" as ThemeMode)}
-          >
-            {t("settingsThemeLight")}
-          </button>
+        <div className="settings-section">
+          <SwitchRow
+            label={t("settingsAutostart")}
+            hint={t("settingsAutostartHint")}
+            on={autostart}
+            disabled={autostartBusy}
+            onToggle={() => void onAutostartChange(!autostart)}
+          />
+          <SwitchRow
+            label={t("settingsRestoreVault")}
+            hint={t("settingsRestoreVaultHint")}
+            on={settings.restoreVault}
+            onToggle={() => patch({ restoreVault: !settings.restoreVault })}
+          />
+          <SwitchRow
+            label={t("settingsDeepDefault")}
+            hint={t("settingsDeepDefaultHint")}
+            on={settings.deepScanDefault}
+            onToggle={() => patch({ deepScanDefault: !settings.deepScanDefault })}
+          />
+          <SwitchRow
+            label={t("settingsStartMin")}
+            hint={t("settingsStartMinHint")}
+            on={settings.startMinimized}
+            onToggle={() => patch({ startMinimized: !settings.startMinimized })}
+          />
         </div>
-      </div>
 
-      <div className="settings-section">
-        <div className="settings-section-label">{t("settingsLang")}</div>
-        <div className="settings-seg">
-          <button
-            type="button"
-            className={locale === "zh" ? "settings-seg-btn on" : "settings-seg-btn"}
-            onClick={() => setLocale("zh")}
-          >
-            {t("langZh")}
-          </button>
-          <button
-            type="button"
-            className={locale === "en" ? "settings-seg-btn on" : "settings-seg-btn"}
-            onClick={() => setLocale("en")}
-          >
-            {t("langEn")}
-          </button>
+        <div className="settings-section">
+          <div className="settings-section-label">{t("settingsTheme")}</div>
+          <div className="settings-seg">
+            <button
+              type="button"
+              className={theme === "dark" ? "settings-seg-btn on" : "settings-seg-btn"}
+              onClick={() => setTheme("dark" as ThemeMode)}
+            >
+              {t("settingsThemeDark")}
+            </button>
+            <button
+              type="button"
+              className={theme === "light" ? "settings-seg-btn on" : "settings-seg-btn"}
+              onClick={() => setTheme("light" as ThemeMode)}
+            >
+              {t("settingsThemeLight")}
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div className="settings-about">
-        <div className="settings-about-name">
-          FLYBOX · {t("settingsVersion")} {APP_VERSION_LABEL}
+        <div className="settings-section">
+          <div className="settings-section-label">{t("settingsLang")}</div>
+          <div className="settings-seg">
+            <button
+              type="button"
+              className={locale === "zh" ? "settings-seg-btn on" : "settings-seg-btn"}
+              onClick={() => setLocale("zh")}
+            >
+              {t("langZh")}
+            </button>
+            <button
+              type="button"
+              className={locale === "en" ? "settings-seg-btn on" : "settings-seg-btn"}
+              onClick={() => setLocale("en")}
+            >
+              {t("langEn")}
+            </button>
+          </div>
         </div>
-        <div className="settings-about-note">{t("settingsLocalOnly")}</div>
+
+        <div className="settings-about">
+          <div className="settings-about-name">
+            FLYBOX · {t("settingsVersion")} {APP_VERSION_LABEL}
+          </div>
+          <div className="settings-about-note">{t("settingsLocalOnly")}</div>
+        </div>
       </div>
     </div>,
     document.body,

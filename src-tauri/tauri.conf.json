@@ -28,6 +28,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "vendor/bass/*",
+      "vendor/ffmpeg/ffmpeg.exe",
+      "vendor/ffmpeg/ffprobe.exe"
     ]
   }
 }

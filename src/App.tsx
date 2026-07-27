@@ -6,8 +6,6 @@ import {
   useRef,
   useState,
   type ReactNode,
-  type RefObject,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -29,10 +27,12 @@ import {
   Square,
   Trash2,
   ArrowLeft,
+  AudioLines,
   X,
 } from "lucide-react";
 import Passbox from "./Passbox";
 import Notepad from "./Notepad";
+import Soundboard from "./Soundboard";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { LangButton, useI18n } from "./i18n";
 import { ThemeButton, useTheme } from "./theme";
@@ -49,6 +49,8 @@ import logoLight from "./assets/flyshaw-logo-transparent.png";
 export type ModuleChrome = {
   title?: string;
   meta?: string;
+  /** 自定义左侧场景区（如音效子页签）；有则优先于 title/meta */
+  context?: ReactNode;
   tools?: ReactNode;
 };
 
@@ -57,19 +59,12 @@ const ICO = 16;
 const ICO_WIN = 14;
 
 /** 顶栏品牌：手写标 + FLYBOX 名；点击打开设置 */
-function BrandLogo({
-  onClick,
-  btnRef,
-}: {
-  onClick: () => void;
-  btnRef?: RefObject<HTMLButtonElement | null>;
-}) {
+function BrandLogo({ onClick }: { onClick: () => void }) {
   const { theme } = useTheme();
   const { t } = useI18n();
   const src = theme === "light" ? logoLight : logoDark;
   return (
     <button
-      ref={btnRef}
       type="button"
       className="logo logo-btn"
       title={t("settings")}
@@ -640,7 +635,16 @@ function WinControls() {
         type="button"
         className="win-btn close"
         title={t("close")}
-        onClick={() => void appWindow.close()}
+        onClick={() => {
+          void (async () => {
+            try {
+              await invoke("sfx_stop_all");
+            } catch {
+              /* engine may already be gone */
+            }
+            await appWindow.close();
+          })();
+        }}
       >
         <X size={ICO_WIN} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
@@ -667,7 +671,6 @@ export default function App() {
     oy: number;
     moved: boolean;
   } | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const [booting, setBooting] = useState(true);
   /** 深扫子文件夹：默认关，只扫当前目录 */
   const [deepScan, setDeepScan] = useState(false);
@@ -678,30 +681,28 @@ export default function App() {
   const bindContent = useCallback((node: HTMLElement | null) => {
     setScrollRoot(node);
   }, []);
-  /** 三大模块：图库 / 密码箱 / 记事本 */
-  type AppModule = "gallery" | "passbox" | "notepad";
+  /** 四大模块：图库 / 密码箱 / 记事本 / 音效 */
+  type AppModule = "gallery" | "passbox" | "notepad" | "sfx";
   const [appModule, setAppModule] = useState<AppModule>("gallery");
   const [moduleChrome, setModuleChrome] = useState<ModuleChrome | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsAnchor, setSettingsAnchor] = useState<DOMRect | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [autostartOn, setAutostartOn] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
-  const logoBtnRef = useRef<HTMLButtonElement | null>(null);
 
-  const switchModule = useCallback((m: AppModule) => {
-    setActiveIndex(null);
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-    setModuleChrome(null);
-    setAppModule(m);
-  }, []);
-
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 1800);
-  }, []);
+  const switchModule = useCallback(
+    (m: AppModule) => {
+      // 已在当前模块再点一次：不要清 chrome，否则音效子页签不会重挂载也回不来
+      if (m === appModule) return;
+      setActiveIndex(null);
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+      setModuleChrome(null);
+      setAppModule(m);
+    },
+    [appModule],
+  );
 
   const loadImages = useCallback(async (root: string, recursive?: boolean) => {
     const gen = ++loadGen.current;
@@ -769,27 +770,10 @@ export default function App() {
     [vault, loadImages],
   );
 
-  /** Logo：开则关、关则开；打开时再点顶栏其它区域也会关（见 SettingsPopover 捕获） */
+  /** Logo：开则关、关则开 */
   const toggleSettings = useCallback(() => {
-    setSettingsOpen((open) => {
-      if (open) return false;
-      const el = logoBtnRef.current;
-      if (el) setSettingsAnchor(el.getBoundingClientRect());
-      return true;
-    });
+    setSettingsOpen((open) => !open);
   }, []);
-
-  const onTopbarPointerDown = useCallback(
-    (e: ReactPointerEvent) => {
-      if (!settingsOpen) return;
-      const t = e.target;
-      if (!(t instanceof Element)) return;
-      // Logo 交给 toggle；弹窗在 portal 里不在顶栏
-      if (t.closest(".logo-btn") || t.closest(".settings-pop")) return;
-      setSettingsOpen(false);
-    },
-    [settingsOpen],
-  );
 
   const onAutostartChange = useCallback(
     async (on: boolean) => {
@@ -797,14 +781,12 @@ export default function App() {
       try {
         await setAutostart(on);
         setAutostartOn(on);
-        showToast(t("settingsSaved"));
       } catch {
-        showToast(t("settingsAutostartFail"));
       } finally {
         setAutostartBusy(false);
       }
     },
-    [showToast, t],
+    [t],
   );
 
   const openVault = useCallback(
@@ -834,9 +816,8 @@ export default function App() {
         await openVault(selected);
       }
     } catch (e) {
-      showToast(`${t("openFolderFail")}：${e}`);
     }
-  }, [openVault, showToast, t]);
+  }, [openVault, t]);
 
   useEffect(() => {
     if (bootRef.current) return;
@@ -994,9 +975,7 @@ export default function App() {
     if (isVideoEntry(entry)) {
       try {
         await writeText(entry.path);
-        showToast(t("copiedPath"));
       } catch (e) {
-        showToast(`${t("copyFail")}：${e}`);
       }
       return;
     }
@@ -1009,17 +988,13 @@ export default function App() {
       const type = blob.type || "image/png";
       if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
         await navigator.clipboard.write([new ClipboardItem({ [type]: blob })]);
-        showToast(t("copiedClipboard"));
         return;
       }
       await writeText(entry.path);
-      showToast(t("copiedPath"));
     } catch {
       try {
         await writeText(entry.path);
-        showToast(t("copiedPath"));
       } catch (e) {
-        showToast(`${t("copyFail")}：${e}`);
       }
     }
   };
@@ -1050,12 +1025,10 @@ export default function App() {
           setPan({ x: 0, y: 0 });
           return next;
         });
-        showToast(t("deleted"));
       } catch (e) {
-        showToast(`${t("deleteFail")}：${e}`);
       }
     },
-    [showToast, t],
+    [t],
   );
 
   const setMode = (mode: ViewMode) => {
@@ -1084,10 +1057,7 @@ export default function App() {
         id: "copy-path",
         label: t("copyPath"),
         onClick: () => {
-          void writeText(entry.path).then(
-            () => showToast(t("copiedPath")),
-            (e) => showToast(`${t("copyFail")}：${e}`),
-          );
+          void writeText(entry.path).catch(() => {});
         },
       });
       items.push({ id: "sep1", separator: true });
@@ -1109,7 +1079,7 @@ export default function App() {
     },
     // openAt / copyImage 随渲染更新，菜单打开时会重新生成 items
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [deleteImage, showToast, closeLightbox, t],
+    [deleteImage, closeLightbox, t],
   );
 
   const onTileContext = useCallback(
@@ -1150,6 +1120,11 @@ export default function App() {
         id: "notepad",
         label: t("notepad"),
         onClick: () => switchModule("notepad"),
+      });
+      items.push({
+        id: "sfx",
+        label: t("sfxboard"),
+        onClick: () => switchModule("sfx"),
       });
       openCtxMenu(e, items, setCtxMenu);
     },
@@ -1230,10 +1205,9 @@ export default function App() {
           className="topbar"
           data-tauri-drag-region
           onDoubleClick={() => void appWindow.toggleMaximize()}
-          onPointerDown={onTopbarPointerDown}
         >
           <div className="brand" data-tauri-drag-region>
-            <BrandLogo onClick={toggleSettings} btnRef={logoBtnRef} />
+            <BrandLogo onClick={toggleSettings} />
           </div>
           <div className="topbar-right">
             <div className="actions">
@@ -1275,6 +1249,14 @@ export default function App() {
         onClick={() => switchModule("notepad")}
       >
         <FileText size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+      </button>
+      <button
+        type="button"
+        className={appModule === "sfx" ? "icon-btn on" : "icon-btn"}
+        title={t("sfxboard")}
+        onClick={() => switchModule("sfx")}
+      >
+        <AudioLines size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
     </nav>
   );
@@ -1380,7 +1362,8 @@ export default function App() {
             )}
           </>
         ))}
-      {(appModule === "passbox" || appModule === "notepad") && moduleChrome?.tools}
+      {(appModule === "passbox" || appModule === "notepad" || appModule === "sfx") &&
+        moduleChrome?.tools}
       <ThemeButton />
       <LangButton />
     </div>
@@ -1398,7 +1381,6 @@ export default function App() {
         className="topbar"
         data-tauri-drag-region
         onDoubleClick={() => void appWindow.toggleMaximize()}
-        onPointerDown={onTopbarPointerDown}
       >
         <div className="brand" data-tauri-drag-region>
           {galleryViewerChrome && viewing ? (
@@ -1421,7 +1403,7 @@ export default function App() {
             </>
           ) : (
             <>
-              <BrandLogo onClick={toggleSettings} btnRef={logoBtnRef} />
+              <BrandLogo onClick={toggleSettings} />
               <span className="brand-sep" aria-hidden />
               {moduleNav}
               {appModule === "gallery" &&
@@ -1445,20 +1427,33 @@ export default function App() {
                     </span>
                   </div>
                 ))}
-              {(appModule === "passbox" || appModule === "notepad") &&
-                (moduleChrome?.title || moduleChrome?.meta) && (
-                  <div className="brand-context" data-tauri-drag-region>
+              {(appModule === "passbox" || appModule === "notepad" || appModule === "sfx") &&
+                (moduleChrome?.context || moduleChrome?.title || moduleChrome?.meta) && (
+                  <div
+                    className={
+                      moduleChrome?.context
+                        ? "brand-context brand-context-nav"
+                        : "brand-context"
+                    }
+                    data-tauri-drag-region
+                  >
                     <span className="brand-sep" aria-hidden />
-                    {moduleChrome?.title ? (
-                      <span className="module-context" data-tauri-drag-region>
-                        {moduleChrome.title}
-                      </span>
-                    ) : null}
-                    {moduleChrome?.meta ? (
-                      <span className="count-label" data-tauri-drag-region>
-                        {moduleChrome.meta}
-                      </span>
-                    ) : null}
+                    {moduleChrome?.context ? (
+                      moduleChrome.context
+                    ) : (
+                      <>
+                        {moduleChrome?.title ? (
+                          <span className="module-context" data-tauri-drag-region>
+                            {moduleChrome.title}
+                          </span>
+                        ) : null}
+                        {moduleChrome?.meta ? (
+                          <span className="count-label" data-tauri-drag-region>
+                            {moduleChrome.meta}
+                          </span>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                 )}
             </>
@@ -1487,6 +1482,12 @@ export default function App() {
         </div>
       )}
 
+      {appModule === "sfx" && (
+        <div className="module-body">
+          <Soundboard embedded onChromeChange={setModuleChrome} />
+        </div>
+      )}
+
       {appModule === "gallery" && error && <div className="banner error">{error}</div>}
 
       {appModule === "gallery" && !vault && (
@@ -1511,6 +1512,11 @@ export default function App() {
                   id: "notepad",
                   label: t("notepad"),
                   onClick: () => switchModule("notepad"),
+                },
+                {
+                  id: "sfx",
+                  label: t("sfxboard"),
+                  onClick: () => switchModule("sfx"),
                 },
               ],
               setCtxMenu,
@@ -1699,11 +1705,7 @@ export default function App() {
                       const v = e.currentTarget;
                       void v.play().catch(() => undefined);
                     }}
-                    onError={() => {
-                      showToast(
-                        "此视频无法播放（编码/格式不受支持，可试 MP4 H.264）",
-                      );
-                    }}
+                    onError={() => {}}
                   />
                 </div>
               ) : (
@@ -1741,14 +1743,12 @@ export default function App() {
       <SettingsPopover
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        anchor={settingsAnchor}
         settings={appSettings}
         onChange={(next) => void persistAppSettings(next)}
         autostart={autostartOn}
         onAutostartChange={onAutostartChange}
         autostartBusy={autostartBusy}
       />
-      {toast && <div className="toast">{toast}</div>}
       <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
     </div>
   );

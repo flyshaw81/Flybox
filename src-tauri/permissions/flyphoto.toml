@@ -52,3 +52,248 @@ commands.allow = ["vault_delete"]
 identifier = "allow-vault-clear-destroyed"
 description = "Allow clearing destroyed flag to create a new vault"
 commands.allow = ["vault_clear_destroyed"]
+
+[[permission]]
+identifier = "allow-sfx-list-devices"
+description = "Allow listing audio output devices"
+commands.allow = ["sfx_list_devices"]
+
+[[permission]]
+identifier = "allow-sfx-set-device"
+description = "Allow selecting soundboard output device"
+commands.allow = ["sfx_set_device"]
+
+[[permission]]
+identifier = "allow-sfx-set-master-volume"
+description = "Allow setting soundboard master volume"
+commands.allow = ["sfx_set_master_volume"]
+
+[[permission]]
+identifier = "allow-sfx-set-bgm-volume"
+description = "Allow setting soundboard BGM volume"
+commands.allow = ["sfx_set_bgm_volume"]
+
+[[permission]]
+identifier = "allow-sfx-set-sfx-volume"
+description = "Allow setting soundboard SFX bus volume"
+commands.allow = ["sfx_set_sfx_volume"]
+
+[[permission]]
+identifier = "allow-sfx-set-tagged-volume"
+description = "Allow live-adjusting a tagged SFX voice volume"
+commands.allow = ["sfx_set_tagged_volume"]
+
+[[permission]]
+identifier = "allow-sfx-set-bgm-speed"
+description = "Allow setting soundboard BGM playback speed"
+commands.allow = ["sfx_set_bgm_speed"]
+
+[[permission]]
+identifier = "allow-sfx-set-fade-ms"
+description = "Allow setting BGM fade in/out duration"
+commands.allow = ["sfx_set_fade_ms"]
+
+[[permission]]
+identifier = "allow-sfx-seek-bgm"
+description = "Allow seeking within looping BGM"
+commands.allow = ["sfx_seek_bgm"]
+
+[[permission]]
+identifier = "allow-sfx-set-interrupt"
+description = "Allow toggling interrupt playback mode"
+commands.allow = ["sfx_set_interrupt"]
+
+[[permission]]
+identifier = "allow-sfx-set-duck"
+description = "Allow configuring BGM ducking when SFX plays"
+commands.allow = ["sfx_set_duck"]
+
+[[permission]]
+identifier = "allow-sfx-stop-all"
+description = "Allow stopping all soundboard playback"
+commands.allow = ["sfx_stop_all"]
+
+[[permission]]
+identifier = "allow-sfx-stop-sfx"
+description = "Allow stopping one-shot sound effects"
+commands.allow = ["sfx_stop_sfx"]
+
+[[permission]]
+identifier = "allow-sfx-stop-bgm"
+description = "Allow stopping looping BGM"
+commands.allow = ["sfx_stop_bgm"]
+
+[[permission]]
+identifier = "allow-sfx-pause-bgm"
+description = "Allow pausing looping BGM"
+commands.allow = ["sfx_pause_bgm"]
+
+[[permission]]
+identifier = "allow-sfx-resume-bgm"
+description = "Allow resuming looping BGM"
+commands.allow = ["sfx_resume_bgm"]
+
+[[permission]]
+identifier = "allow-sfx-play"
+description = "Allow playing a one-shot sound effect"
+commands.allow = ["sfx_play"]
+
+[[permission]]
+identifier = "allow-sfx-play-bgm"
+description = "Allow playing a looping BGM track"
+commands.allow = ["sfx_play_bgm"]
+
+[[permission]]
+identifier = "allow-sfx-bgm-status"
+description = "Allow reading current BGM status"
+commands.allow = ["sfx_bgm_status"]
+
+[[permission]]
+identifier = "allow-sfx-scan-library"
+description = "Allow scanning the soundboard library folder"
+commands.allow = ["sfx_scan_library"]
+
+[[permission]]
+identifier = "allow-sfx-import-files"
+description = "Allow importing audio files into the soundboard library"
+commands.allow = ["sfx_import_files"]
+
+[[permission]]
+identifier = "allow-sfx-delete-file"
+description = "Allow deleting a soundboard audio file"
+commands.allow = ["sfx_delete_file"]
+
+[[permission]]
+identifier = "allow-sfx-list-input-devices"
+description = "Allow listing audio input devices for voice duck"
+commands.allow = ["sfx_list_input_devices"]
+
+[[permission]]
+identifier = "allow-sfx-set-bgm-pitch"
+description = "Allow setting BGM pitch"
+commands.allow = ["sfx_set_bgm_pitch"]
+
+[[permission]]
+identifier = "allow-sfx-set-voice-duck"
+description = "Allow configuring voice ducking"
+commands.allow = ["sfx_set_voice_duck"]
+
+[[permission]]
+identifier = "allow-sfx-set-loop-mode"
+description = "Allow setting BGM loop mode"
+commands.allow = ["sfx_set_loop_mode"]
+
+[[permission]]
+identifier = "allow-sfx-set-playlist"
+description = "Allow setting BGM playlist order"
+commands.allow = ["sfx_set_playlist"]
+
+[[permission]]
+identifier = "allow-sfx-probe"
+description = "Allow probing audio metadata via ffprobe"
+commands.allow = ["sfx_probe"]
+
+[[permission]]
+identifier = "allow-sfx-transcode"
+description = "Allow transcoding audio via ffmpeg"
+commands.allow = ["sfx_transcode"]
+
+[[permission]]
+identifier = "allow-sfx-waveform"
+description = "Allow generating waveform peaks"
+commands.allow = ["sfx_waveform"]
+
+[[permission]]
+identifier = "allow-sfx-category-create"
+description = "Allow creating sound library categories"
+commands.allow = ["sfx_category_create"]
+
+[[permission]]
+identifier = "allow-sfx-category-rename"
+description = "Allow renaming sound library categories"
+commands.allow = ["sfx_category_rename"]
+
+[[permission]]
+identifier = "allow-sfx-category-delete"
+description = "Allow deleting sound library categories"
+commands.allow = ["sfx_category_delete"]
+
+[[permission]]
+identifier = "allow-sfx-move-file"
+description = "Allow moving sound files between categories"
+commands.allow = ["sfx_move_file"]
+
+[[permission]]
+identifier = "allow-sfx-record-start"
+description = "Allow starting microphone/system recording into library"
+commands.allow = ["sfx_record_start"]
+
+[[permission]]
+identifier = "allow-sfx-record-stop"
+description = "Allow stopping recording and writing WAV"
+commands.allow = ["sfx_record_stop"]
+
+[[permission]]
+identifier = "allow-sfx-record-status"
+description = "Allow reading recording status"
+commands.allow = ["sfx_record_status"]
+
+[[permission]]
+identifier = "allow-sfx-export-range"
+description = "Allow exporting a trimmed audio range via ffmpeg"
+commands.allow = ["sfx_export_range"]
+
+[[permission]]
+identifier = "allow-sfx-export-montage"
+description = "Allow cutting and concatenating multiple clips via ffmpeg"
+commands.allow = ["sfx_export_montage"]
+
+[[permission]]
+identifier = "allow-obs-configure"
+description = "Allow configuring OBS WebSocket"
+commands.allow = ["obs_configure"]
+
+[[permission]]
+identifier = "allow-obs-connect"
+description = "Allow connecting to OBS"
+commands.allow = ["obs_connect"]
+
+[[permission]]
+identifier = "allow-obs-status"
+description = "Allow reading OBS status"
+commands.allow = ["obs_status"]
+
+[[permission]]
+identifier = "allow-obs-set-scene"
+description = "Allow switching OBS scenes"
+commands.allow = ["obs_set_scene"]
+
+[[permission]]
+identifier = "allow-obs-sync-media-seek"
+description = "Allow syncing OBS media seek"
+commands.allow = ["obs_sync_media_seek"]
+
+[[permission]]
+identifier = "allow-obs-disconnect"
+description = "Allow disconnecting OBS"
+commands.allow = ["obs_disconnect"]
+
+[[permission]]
+identifier = "allow-midi-list-ports"
+description = "Allow listing MIDI output ports"
+commands.allow = ["midi_list_ports"]
+
+[[permission]]
+identifier = "allow-midi-status"
+description = "Allow reading MIDI MTC status"
+commands.allow = ["midi_status"]
+
+[[permission]]
+identifier = "allow-midi-configure"
+description = "Allow configuring MIDI MTC"
+commands.allow = ["midi_configure"]
+
+[[permission]]
+identifier = "allow-midi-send-position"
+description = "Allow sending MIDI MTC position"
+commands.allow = ["midi_send_position"]

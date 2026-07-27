@@ -1,3 +1,8 @@
+mod bass_ffi;
+mod ffmpeg_util;
+mod midi_mtc;
+mod obs_ctrl;
+mod sfx;
 mod vault;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -11,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tiny_http::{Header, Response, Server, StatusCode};
+use midi_mtc::MidiState;
+use obs_ctrl::ObsState;
+use sfx::SfxState;
 use vault::VaultState;
 
 /// Frontend assets baked into the binary at compile time (from ../dist).
@@ -586,9 +594,16 @@ fn urlencoding_decode(s: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Start pure-local UI host before the window opens.
-    let ui_port = spawn_local_ui_server();
-    let ui_origin = format!("http://127.0.0.1:{ui_port}");
+    // Always host /__file (+ release UI) on 127.0.0.1 tiny_http.
+    // Dev window loads Vite for hot reload; __FLYPHOTO_ORIGIN__ still points at tiny_http for media.
+    let file_origin = {
+        let ui_port = spawn_local_ui_server();
+        format!("http://127.0.0.1:{ui_port}")
+    };
+    #[cfg(debug_assertions)]
+    let ui_origin = "http://localhost:1420".to_string();
+    #[cfg(not(debug_assertions))]
+    let ui_origin = file_origin.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -597,16 +612,32 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::Builder::new().app_name("FLYBOX").build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(VaultState::default())
+        .manage(SfxState::default())
+        .manage(ObsState::default())
+        .manage(MidiState::default())
         .setup(move |app| {
-            let origin = ui_origin.clone();
-            let url: url::Url = format!("{origin}/").parse().expect("UI URL");
+            let page_origin = ui_origin.clone();
+            let media_origin = file_origin.clone();
+            let url: url::Url = format!("{page_origin}/").parse().expect("UI URL");
 
-            // Allow IPC from 127.0.0.1 origin (not tauri.localhost).
+            // Allow IPC from the UI origin (not tauri.localhost).
+            let mut cap = tauri::ipc::CapabilityBuilder::new("local-ui")
+                    .remote(page_origin.clone())
+                    .remote(format!("{page_origin}/*"))
+                    .remote(media_origin.clone())
+                    .remote(format!("{media_origin}/*"));
+            #[cfg(debug_assertions)]
+            {
+                cap = cap
+                    .remote("http://127.0.0.1:1420".into())
+                    .remote("http://127.0.0.1:1420/*".into())
+                    .remote("http://localhost:1420".into())
+                    .remote("http://localhost:1420/*".into());
+            }
             app.add_capability(
-                tauri::ipc::CapabilityBuilder::new("local-ui")
-                    .remote(origin.clone())
-                    .remote(format!("{origin}/*"))
+                cap
                     .window("main")
                     .permission("core:default")
                     .permission("core:window:allow-minimize")
@@ -627,22 +658,79 @@ pub fn run() {
                     .permission("allow-vault-upsert")
                     .permission("allow-vault-delete")
                     .permission("allow-vault-clear-destroyed")
+                    .permission("allow-sfx-list-devices")
+                    .permission("allow-sfx-list-input-devices")
+                    .permission("allow-sfx-set-device")
+                    .permission("allow-sfx-set-master-volume")
+                    .permission("allow-sfx-set-bgm-volume")
+                    .permission("allow-sfx-set-sfx-volume")
+                    .permission("allow-sfx-set-tagged-volume")
+                    .permission("allow-sfx-set-bgm-speed")
+                    .permission("allow-sfx-set-bgm-pitch")
+                    .permission("allow-sfx-set-fade-ms")
+                    .permission("allow-sfx-set-interrupt")
+                    .permission("allow-sfx-set-duck")
+                    .permission("allow-sfx-set-voice-duck")
+                    .permission("allow-sfx-set-loop-mode")
+                    .permission("allow-sfx-set-playlist")
+                    .permission("allow-sfx-stop-all")
+                    .permission("allow-sfx-stop-sfx")
+                    .permission("allow-sfx-stop-bgm")
+                    .permission("allow-sfx-pause-bgm")
+                    .permission("allow-sfx-resume-bgm")
+                    .permission("allow-sfx-seek-bgm")
+                    .permission("allow-sfx-play")
+                    .permission("allow-sfx-play-bgm")
+                    .permission("allow-sfx-bgm-status")
+                    .permission("allow-sfx-probe")
+                    .permission("allow-sfx-transcode")
+                    .permission("allow-sfx-waveform")
+                    .permission("allow-sfx-scan-library")
+                    .permission("allow-sfx-import-files")
+                    .permission("allow-sfx-delete-file")
+                    .permission("allow-sfx-category-create")
+                    .permission("allow-sfx-category-rename")
+                    .permission("allow-sfx-category-delete")
+                    .permission("allow-sfx-move-file")
+                    .permission("allow-sfx-record-start")
+                    .permission("allow-sfx-record-stop")
+                    .permission("allow-sfx-record-status")
+                    .permission("allow-sfx-export-range")
+                    .permission("allow-obs-configure")
+                    .permission("allow-obs-connect")
+                    .permission("allow-obs-status")
+                    .permission("allow-obs-set-scene")
+                    .permission("allow-obs-sync-media-seek")
+                    .permission("allow-obs-disconnect")
+                    .permission("allow-midi-list-ports")
+                    .permission("allow-midi-status")
+                    .permission("allow-midi-configure")
+                    .permission("allow-midi-send-position")
                     .permission("dialog:default")
                     .permission("clipboard-manager:allow-write-text")
                     .permission("clipboard-manager:allow-read-text")
                     .permission("store:default")
                     .permission("fs:default")
                     .permission("opener:default")
-                    .permission("autostart:default"),
+                    .permission("autostart:default")
+                    .permission("global-shortcut:allow-is-registered")
+                    .permission("global-shortcut:allow-register")
+                    .permission("global-shortcut:allow-unregister")
+                    .permission("global-shortcut:allow-unregister-all"),
             )?;
 
             let init_script = format!(
                 "window.__FLYPHOTO_ORIGIN__={};",
-                serde_json::to_string(&origin).unwrap()
+                serde_json::to_string(&media_origin).unwrap()
             );
 
+            let window_title = if cfg!(debug_assertions) {
+                "FLYBOX Dev"
+            } else {
+                "FLYBOX"
+            };
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("FLYBOX")
+                .title(window_title)
                 .inner_size(1280.0, 840.0)
                 .min_inner_size(720.0, 480.0)
                 .center()
@@ -673,7 +761,68 @@ pub fn run() {
             vault::vault_upsert,
             vault::vault_delete,
             vault::vault_clear_destroyed,
+            sfx::sfx_list_devices,
+            sfx::sfx_list_input_devices,
+            sfx::sfx_set_device,
+            sfx::sfx_set_master_volume,
+            sfx::sfx_set_bgm_volume,
+            sfx::sfx_set_sfx_volume,
+            sfx::sfx_set_bgm_speed,
+            sfx::sfx_set_bgm_pitch,
+            sfx::sfx_set_fade_ms,
+            sfx::sfx_set_interrupt,
+            sfx::sfx_set_duck,
+            sfx::sfx_set_voice_duck,
+            sfx::sfx_set_loop_mode,
+            sfx::sfx_set_playlist,
+            sfx::sfx_stop_all,
+            sfx::sfx_stop_sfx,
+            sfx::sfx_stop_bgm,
+            sfx::sfx_pause_bgm,
+            sfx::sfx_resume_bgm,
+            sfx::sfx_seek_bgm,
+            sfx::sfx_play,
+            sfx::sfx_set_tagged_volume,
+            sfx::sfx_play_bgm,
+            sfx::sfx_bgm_status,
+            sfx::sfx_probe,
+            sfx::sfx_transcode,
+            sfx::sfx_waveform,
+            sfx::sfx_scan_library,
+            sfx::sfx_import_files,
+            sfx::sfx_delete_file,
+            sfx::sfx_category_create,
+            sfx::sfx_category_rename,
+            sfx::sfx_category_delete,
+            sfx::sfx_move_file,
+            sfx::sfx_record_start,
+            sfx::sfx_record_stop,
+            sfx::sfx_record_status,
+            sfx::sfx_export_range,
+            sfx::sfx_export_montage,
+            obs_ctrl::obs_configure,
+            obs_ctrl::obs_connect,
+            obs_ctrl::obs_status,
+            obs_ctrl::obs_set_scene,
+            obs_ctrl::obs_sync_media_seek,
+            obs_ctrl::obs_disconnect,
+            midi_mtc::midi_list_ports,
+            midi_mtc::midi_status,
+            midi_mtc::midi_configure,
+            midi_mtc::midi_send_position,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Always silence BASS before the process dies — otherwise playback
+            // can keep going after the window is gone (zombie audio).
+            match event {
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                    if let Some(state) = app_handle.try_state::<SfxState>() {
+                        state.shutdown();
+                    }
+                }
+                _ => {}
+            }
+        });
 }

@@ -400,7 +400,6 @@ export default function Passbox({
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [entries, setEntries] = useState<VaultEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   /** 编辑中各分类缓存，换 tab 不串字 */
   const typeCacheRef = useRef<Partial<Record<EntryType, TypeSlice>>>({});
   const [formGen, setFormGen] = useState(0);
@@ -438,11 +437,6 @@ export default function Passbox({
 
   // edit
   const [draft, setDraft] = useState<VaultEntry>(emptyDraft());
-
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 1800);
-  }, []);
 
   const refreshStatus = useCallback(async () => {
     const s = await invoke<VaultStatus>("vault_status");
@@ -484,26 +478,22 @@ export default function Passbox({
     return entries.filter((e) => e.type === tab);
   }, [entries, tab]);
 
-  const copyText = async (text: string, label = "已复制") => {
+  const copyText = async (text: string) => {
     if (!text) {
-      showToast("没有可复制的内容");
       return;
     }
     try {
       await writeText(text);
-      showToast(label);
     } catch (e1) {
       // 插件失败时退回浏览器剪贴板
       try {
         if (navigator.clipboard?.writeText) {
           await navigator.clipboard.writeText(text);
-          showToast(label);
           return;
         }
       } catch {
         /* fall through */
       }
-      showToast(`复制失败：${e1}`);
     }
   };
 
@@ -547,7 +537,7 @@ export default function Passbox({
   };
 
   const copyEntry = async (e: VaultEntry) => {
-    await copyText(formatEntryAll(e), "已复制全部");
+    await copyText(formatEntryAll(e));
   };
 
   const onSetup = async () => {
@@ -571,7 +561,6 @@ export default function Passbox({
       setEntries([]);
       setScreen("list");
       await refreshStatus();
-      showToast("密码箱已创建");
     } catch (e) {
       setError(String(e));
     }
@@ -802,7 +791,6 @@ export default function Passbox({
       setFormGen((g) => g + 1);
       setDraft(emptyDraft(tab === "all" ? "api" : tab));
       setScreen("list");
-      showToast("已保存");
     } catch (e) {
       setError(String(e));
     }
@@ -811,7 +799,6 @@ export default function Passbox({
   const addImages = async () => {
     const current = getImages(draft.fields);
     if (current.length >= MAX_ENTRY_IMAGES) {
-      showToast(`最多 ${MAX_ENTRY_IMAGES} 张图`);
       return;
     }
     try {
@@ -834,7 +821,6 @@ export default function Passbox({
         if (typeof path !== "string" || !path) continue;
         const bytes = await readFile(path);
         if (bytes.byteLength > MAX_IMAGE_BYTES) {
-          showToast(`图片过大已跳过（单张不超过约 2.5MB）`);
           continue;
         }
         added.push(await bytesToDataUrl(bytes, mimeFromPath(path)));
@@ -847,9 +833,7 @@ export default function Passbox({
           images: [...getImages(d.fields), ...added],
         },
       }));
-      showToast(`已添加 ${added.length} 张图`);
     } catch (e) {
-      showToast(`添加图片失败：${e}`);
     }
   };
 
@@ -874,7 +858,6 @@ export default function Passbox({
       const list = await invoke<VaultEntry[]>("vault_delete", { id });
       setEntries(list.map(normalizeEntry));
       setScreen("list");
-      showToast("已删除");
     } catch (e) {
       setError(String(e));
     }
@@ -1372,7 +1355,7 @@ export default function Passbox({
                         type="button"
                         className="icon-btn"
                         title="复制 URL"
-                        onClick={() => void copyText(u, "已复制 URL")}
+                        onClick={() => void copyText(u)}
                       >
                         <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
                       </button>
@@ -1408,7 +1391,7 @@ export default function Passbox({
                         type="button"
                         className="icon-btn"
                         title="复制 KEY"
-                        onClick={() => void copyText(k, "已复制 KEY")}
+                        onClick={() => void copyText(k)}
                       >
                         <Copy size={14} strokeWidth={1.75} absoluteStrokeWidth />
                       </button>
@@ -1756,7 +1739,6 @@ export default function Passbox({
         </main>
       )}
 
-      {toast && <div className="toast">{toast}</div>}
       <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
     </div>
   );
