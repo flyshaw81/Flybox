@@ -78,7 +78,7 @@ export default function FlyTooltip() {
       clearTimer();
       timerRef.current = window.setTimeout(() => {
         setTip({ text: savedRef.current, x, y, place });
-      }, 380);
+      }, 420);
     };
 
     const onOver = (e: MouseEvent) => {

@@ -2452,32 +2452,65 @@ html.is-resizing .content {
   width: 160px;
 }
 
-/* ??????????????????????? ???*/
+/* FLYBOX ???? ?? ???????????? */
 .fly-tip {
   position: fixed;
   z-index: 10001;
-  transform: translateX(-50%);
-  max-width: min(280px, calc(100vw - 16px));
-  padding: 6px 10px;
-  background: var(--menu-bg);
-  border: 1px solid var(--border-strong);
-  box-shadow: 0 6px 18px var(--shadow);
-  color: var(--text);
+  transform: translateX(-50%) translateY(4px);
+  max-width: min(260px, calc(100vw - 20px));
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--menu-bg) 88%, #000);
+  border: none;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.92);
   font-family: var(--flybox-font);
   font-size: 12px;
-  font-weight: 400;
-  line-height: 1.4;
-  letter-spacing: 0.01em;
-  border-radius: 0;
+  font-weight: 550;
+  line-height: 1.35;
+  letter-spacing: 0.02em;
+  border-radius: 8px;
   pointer-events: none;
   white-space: pre-wrap;
   word-break: break-word;
   -webkit-user-select: none;
   user-select: none;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  opacity: 0;
+  animation: fly-tip-in 0.16s ease forwards;
 }
 
 .fly-tip-above {
-  transform: translateX(-50%);
+  transform: translateX(-50%) translateY(-4px);
+  animation-name: fly-tip-in-above;
+}
+
+@keyframes fly-tip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes fly-tip-in-above {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+[data-theme="light"] .fly-tip {
+  background: var(--menu-bg);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12);
+  color: var(--text);
 }
 
 /* ????????? ???*/
@@ -3601,10 +3634,19 @@ html.is-resizing .content {
   list-style: none;
   min-width: 100%;
   width: max-content;
+  max-height: min(280px, 50vh);
+  overflow-y: auto;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg-elevated, var(--bg));
   box-shadow: 0 12px 28px color-mix(in srgb, #000 30%, transparent);
+}
+
+/* ?? body??????? overflow:hidden ?? */
+.sfx-menu-select-list.portal {
+  position: fixed;
+  top: auto;
+  z-index: 10060;
 }
 
 .sfx-menu-select-opt {
@@ -6054,7 +6096,127 @@ html.is-resizing .content {
     rgba(0, 0, 0, 0.35) 0px -1px 0px inset;
 }
 
-/* ??????????*/
+/* ????? / ??? ?? ????????? */
+[data-theme="light"] .sfx-studio-kind {
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+[data-theme="light"] .sfx-studio-kind-btn {
+  color: var(--muted);
+}
+
+[data-theme="light"] .sfx-studio-kind-btn:hover {
+  color: var(--text);
+}
+
+[data-theme="light"] .sfx-studio-kind-btn.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, #fff);
+}
+
+[data-theme="light"] .sfx-studio-top-search .sfx-search,
+[data-theme="light"] .sfx-studio-search {
+  background: var(--bg-input);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+[data-theme="light"] .sfx-studio-search:focus {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+[data-theme="light"] .sfx-studio-top-actions .sfx-tl-tool,
+[data-theme="light"] .sfx-tl-tool {
+  color: var(--icon);
+}
+
+[data-theme="light"] .sfx-tl-tool:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+[data-theme="light"] .sfx-tl-tool.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+[data-theme="light"] .sfx-tl-tool.on:hover:not(:disabled) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+[data-theme="light"] .sfx-tl-timecode {
+  color: var(--text);
+}
+
+[data-theme="light"] .sfx-tl-zoom {
+  accent-color: var(--accent);
+}
+
+[data-theme="light"] .sfx-tl {
+  background: var(--bg-elev);
+  border-color: var(--border-strong);
+}
+
+[data-theme="light"] .sfx-tl-side {
+  background: var(--bg-panel);
+}
+
+[data-theme="light"] .sfx-tl-add-track {
+  color: var(--icon);
+}
+
+[data-theme="light"] .sfx-tl-add-track:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+[data-theme="light"] .sfx-tl-track-label {
+  color: var(--soft);
+}
+
+[data-theme="light"] .sfx-tl-track-label.on {
+  color: color-mix(in srgb, var(--accent) 75%, #1a1a1a);
+  background: color-mix(in srgb, var(--accent) 12%, #fff);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+[data-theme="light"] .sfx-tl-track-mute {
+  color: var(--icon);
+}
+
+[data-theme="light"] .sfx-tl-ruler {
+  background: var(--bg-panel);
+}
+
+[data-theme="light"] .sfx-tl-mark {
+  color: var(--muted);
+}
+
+[data-theme="light"] .sfx-tl-tick {
+  background: var(--border-strong);
+}
+
+[data-theme="light"] .sfx-tl-lanes {
+  background: repeating-linear-gradient(
+    90deg,
+    transparent,
+    transparent 47px,
+    color-mix(in srgb, var(--border-strong) 55%, transparent) 47px,
+    color-mix(in srgb, var(--border-strong) 55%, transparent) 48px
+  );
+}
+
+[data-theme="light"] .sfx-tl-lane.on {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  outline-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+[data-theme="light"] .sfx-studio-card {
+  background: var(--bg-elev);
+  border-color: var(--border);
+}
+
 [data-theme="light"] .sfx-vk {
   background-color: #d3d3d3;
   background-image: linear-gradient(to bottom, #d3d3d3, #c5c5c5);
