@@ -137,7 +137,7 @@ mod engine {
         duck_factor: f32,
         fade_ms: u64,
         fading_out: bool,
-        loop_mode: String, // loopOne | loopList
+        loop_mode: String, // loopOne | loopList | shuffle
         playlist: Vec<String>,
         voice_duck_enabled: bool,
         voice_threshold: f32,
@@ -349,8 +349,8 @@ mod engine {
         fn play_bgm(&mut self, path: &str, volume: f32) -> Result<(), String> {
             self.hard_stop_bgm();
             let p = Path::new(path);
-            // loopOne: BASS loop flag; loopList: no flag, tick() advances playlist
-            let loop_it = self.loop_mode != "loopList";
+            // loopOne: BASS 单曲循环；loopList/shuffle: 播完由 tick 切下一首
+            let loop_it = self.loop_mode == "loopOne";
             let h = match bass_ffi::create_decode_stream(p, loop_it) {
                 Ok(dec) => match bass_ffi::tempo_create(dec) {
                     Ok(h) => h,
@@ -591,7 +591,7 @@ mod engine {
             // playlist advance when not looping single forever via BASS loop —
             // for loopList we disable bass loop and chain; currently streams loop via flag.
             // When loopList: if near end, jump next — handled in status poll via ended.
-            if self.loop_mode == "loopList" {
+            if self.loop_mode == "loopList" || self.loop_mode == "shuffle" {
                 if let Some(h) = self.bgm {
                     if let Some(dur) = self.bgm_duration_ms {
                         let pos = bass_ffi::position_ms(h);
@@ -599,9 +599,25 @@ mod engine {
                         {
                             if let Some(cur) = self.bgm_path.clone() {
                                 if let Some(i) = self.playlist.iter().position(|p| p == &cur) {
-                                    let next = self.playlist[(i + 1) % self.playlist.len()].clone();
-                                    let vol = self.bgm_item_volume;
-                                    let _ = self.play_bgm(&next, vol);
+                                    let len = self.playlist.len();
+                                    if len > 0 {
+                                        let next_i = if self.loop_mode == "shuffle" && len > 1 {
+                                            let seed = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_nanos() as usize)
+                                                .unwrap_or(0);
+                                            let mut n = seed % len;
+                                            if n == i {
+                                                n = (n + 1) % len;
+                                            }
+                                            n
+                                        } else {
+                                            (i + 1) % len
+                                        };
+                                        let next = self.playlist[next_i].clone();
+                                        let vol = self.bgm_item_volume;
+                                        let _ = self.play_bgm(&next, vol);
+                                    }
                                 }
                             }
                         }

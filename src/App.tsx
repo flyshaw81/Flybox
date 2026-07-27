@@ -42,6 +42,12 @@ import SettingsPopover, {
   setAutostart,
   type AppSettings,
 } from "./SettingsPopover";
+import {
+  applyBrandColors,
+  DEFAULT_ACCENT,
+  DEFAULT_ASSIST,
+  normalizeHex,
+} from "./brandColors";
 import logoDark from "./assets/flyshaw-logo-white-transparent.png";
 import logoLight from "./assets/flyshaw-logo-transparent.png";
 
@@ -104,6 +110,8 @@ const VAULT_KEY = "vaultPath";
 const RESTORE_VAULT_KEY = "restoreVault";
 const DEEP_DEFAULT_KEY = "deepScanDefault";
 const START_MIN_KEY = "startMinimized";
+const ACCENT_KEY = "accentColor";
+const ASSIST_KEY = "assistColor";
 /** 缩略图并发：图片可高一点；视频抽帧更重，单独限流 */
 const THUMB_CONCURRENCY = 6;
 const VIDEO_THUMB_CONCURRENCY = 2;
@@ -688,6 +696,10 @@ export default function App() {
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+
+  useEffect(() => {
+    applyBrandColors(appSettings.accentColor, appSettings.assistColor);
+  }, [appSettings.accentColor, appSettings.assistColor]);
   const [autostartOn, setAutostartOn] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
 
@@ -752,19 +764,25 @@ export default function App() {
   const persistAppSettings = useCallback(
     async (next: AppSettings) => {
       const prevDeep = deepScanRef.current;
-      setAppSettings(next);
-      deepScanRef.current = next.deepScanDefault;
-      setDeepScan(next.deepScanDefault);
+      const accent = normalizeHex(next.accentColor, DEFAULT_ACCENT);
+      const assist = normalizeHex(next.assistColor, DEFAULT_ASSIST);
+      const normalized = { ...next, accentColor: accent, assistColor: assist };
+      setAppSettings(normalized);
+      applyBrandColors(accent, assist);
+      deepScanRef.current = normalized.deepScanDefault;
+      setDeepScan(normalized.deepScanDefault);
       try {
         const store = await getStore();
-        await store.set(RESTORE_VAULT_KEY, next.restoreVault);
-        await store.set(DEEP_DEFAULT_KEY, next.deepScanDefault);
-        await store.set(START_MIN_KEY, next.startMinimized);
+        await store.set(RESTORE_VAULT_KEY, normalized.restoreVault);
+        await store.set(DEEP_DEFAULT_KEY, normalized.deepScanDefault);
+        await store.set(START_MIN_KEY, normalized.startMinimized);
+        await store.set(ACCENT_KEY, accent);
+        await store.set(ASSIST_KEY, assist);
       } catch {
         /* ignore */
       }
-      if (vault && prevDeep !== next.deepScanDefault) {
-        void loadImages(vault, next.deepScanDefault);
+      if (vault && prevDeep !== normalized.deepScanDefault) {
+        void loadImages(vault, normalized.deepScanDefault);
       }
     },
     [vault, loadImages],
@@ -828,11 +846,31 @@ export default function App() {
         const restore = (await store.get<boolean>(RESTORE_VAULT_KEY)) ?? true;
         const deepDef = (await store.get<boolean>(DEEP_DEFAULT_KEY)) ?? false;
         const startMin = (await store.get<boolean>(START_MIN_KEY)) ?? false;
+        const accent = normalizeHex(
+          (await store.get<string>(ACCENT_KEY)) ?? DEFAULT_ACCENT,
+          DEFAULT_ACCENT,
+        );
+        let assist = normalizeHex(
+          (await store.get<string>(ASSIST_KEY)) ?? DEFAULT_ASSIST,
+          DEFAULT_ASSIST,
+        );
+        // 旧出厂绿 → 新出厂蓝
+        if (assist === "#3cb371") {
+          assist = DEFAULT_ASSIST;
+          try {
+            await store.set(ASSIST_KEY, assist);
+          } catch {
+            /* ignore */
+          }
+        }
         setAppSettings({
           restoreVault: restore,
           deepScanDefault: deepDef,
           startMinimized: startMin,
+          accentColor: accent,
+          assistColor: assist,
         });
+        applyBrandColors(accent, assist);
         deepScanRef.current = deepDef;
         setDeepScan(deepDef);
 

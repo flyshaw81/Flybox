@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open } from "@tauri-apps/plugin-dialog";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { load } from "@tauri-apps/plugin-store";
 import {
@@ -25,7 +26,6 @@ import {
   FolderPlus,
   Keyboard,
   Library,
-  ListMusic,
   Music2,
   Pause,
   Pencil,
@@ -35,12 +35,15 @@ import {
   Repeat,
   Repeat1,
   Settings2,
+  Shuffle,
   SkipBack,
   SkipForward,
   Square,
   Trash2,
 } from "lucide-react";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
+import DarkVeil from "./DarkVeil";
+import ImageCropModal from "./ImageCropModal";
 import SfxHotkeysPanel from "./SfxHotkeysPanel";
 import SfxStudioMontage, {
   type StudioDropApi,
@@ -108,7 +111,7 @@ type SfxSettings = {
   fadeMs: number;
   sfxFadeMs: number;
   padCols: number;
-  loopMode: "loopOne" | "loopList";
+  loopMode: "loopOne" | "loopList" | "shuffle";
   interrupt: boolean;
   duckEnabled: boolean;
   duckFactor: number;
@@ -135,6 +138,8 @@ type SfxSettings = {
   midiPort: string | null;
   midiFps: number;
   midiOffsetMs: number;
+  /** 唱片封面（裁剪后的 JPEG dataURL） */
+  vinylArtDataUrl: string | null;
   /** settings schema rev — bump when changing defaults for existing installs */
   sfxSettingsRev?: number;
   /** @deprecated migrated into mySfx */
@@ -190,6 +195,7 @@ const DEFAULT_SETTINGS: SfxSettings = {
   midiPort: null,
   midiFps: 30,
   midiOffsetMs: 0,
+  vinylArtDataUrl: null,
 };
 
 const EMPTY_BGM: BgmStatus = {
@@ -269,12 +275,22 @@ function migrateSettings(saved: Partial<SfxSettings>): SfxSettings {
     padCols: [3, 4, 5, 6].includes(saved.padCols ?? 0)
       ? (saved.padCols as number)
       : DEFAULT_SETTINGS.padCols,
-    loopMode: saved.loopMode === "loopList" ? "loopList" : "loopOne",
+    loopMode:
+      saved.loopMode === "loopList"
+        ? "loopList"
+        : saved.loopMode === "shuffle"
+          ? "shuffle"
+          : "loopOne",
     interrupt,
     sfxSettingsRev: Math.max(rev, 1),
     duckEnabled: saved.duckEnabled ?? DEFAULT_SETTINGS.duckEnabled,
     duckFactor: saved.duckFactor ?? DEFAULT_SETTINGS.duckFactor,
     voiceDuckEnabled: saved.voiceDuckEnabled ?? false,
+    // 以前误存成舞台背景的图，迁到唱片封面
+    vinylArtDataUrl:
+      saved.vinylArtDataUrl ??
+      (saved as { stageBgDataUrl?: string | null }).stageBgDataUrl ??
+      null,
     tab,
   };
 }
@@ -302,6 +318,7 @@ export default function Soundboard({
   const [playing, setPlaying] = useState<Record<string, number>>({});
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const audioSettingsRef = useRef<HTMLDivElement | null>(null);
+  const [vinylCropSrc, setVinylCropSrc] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [bgm, setBgm] = useState<BgmStatus>(EMPTY_BGM);
   const [seekDrag, setSeekDrag] = useState<number | null>(null);
@@ -341,6 +358,27 @@ export default function Soundboard({
     setSettings(next);
     const store = await load(STORE_FILE, { autoSave: true });
     await store.set("sfx", next);
+  }, []);
+
+  const pickVinylArt = useCallback(async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          {
+            name: "Image",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+          },
+        ],
+      });
+      if (typeof selected !== "string" || !selected) return;
+      // 读成本地 blob，避免 canvas 跨域导致「用这块」点了没反应
+      const bytes = await readFile(selected);
+      const blob = new Blob([bytes]);
+      setVinylCropSrc(URL.createObjectURL(blob));
+    } catch (e) {
+      setError(String(e));
+    }
   }, []);
 
   const reloadLibrary = useCallback(async (root: string | null) => {
@@ -1103,7 +1141,7 @@ export default function Soundboard({
   );
 
   const onLoopMode = useCallback(
-    async (loopMode: "loopOne" | "loopList") => {
+    async (loopMode: "loopOne" | "loopList" | "shuffle") => {
       const next = { ...settingsRef.current, loopMode };
       await persist(next);
       await invoke("sfx_set_loop_mode", { mode: loopMode });
@@ -1119,6 +1157,12 @@ export default function Soundboard({
       if (!list.length) return;
       const cur = bgm.path;
       let i = cur ? list.indexOf(cur) : -1;
+      if (settingsRef.current.loopMode === "shuffle" && list.length > 1) {
+        let n = Math.floor(Math.random() * list.length);
+        if (n === i) n = (n + 1) % list.length;
+        await playBgm(list[n]);
+        return;
+      }
       if (i < 0) i = dir > 0 ? -1 : 0;
       i = (i + dir + list.length) % list.length;
       await playBgm(list[i]);
@@ -1887,36 +1931,117 @@ export default function Soundboard({
           {tab === "bgm" && (
             <div className="sfx-player bgm">
               <div className="sfx-player-stage">
-                <div className="sfx-player-badge">
-                  <Music2 size={16} strokeWidth={1.75} absoluteStrokeWidth />
-                  {t("sfxTabBgm")}
-                  {bgm.fading ? <span className="sfx-fade-tag">{t("sfxFading")}</span> : null}
+                <div className="sfx-player-stage-bg" aria-hidden>
+                  <DarkVeil
+                    speed={0.5}
+                    warpAmount={0}
+                    noiseIntensity={0}
+                    scanlineIntensity={0}
+                    scanlineFrequency={0}
+                    resolutionScale={1}
+                  />
                 </div>
-                <div className="sfx-player-title">{bgm.path ? bgmName : t("sfxBgmPickHint")}</div>
-                <div className="sfx-player-sub muted">
-                  {bgm.playing
-                    ? t("sfxBgmLooping")
-                    : bgm.paused
-                      ? t("sfxBgmPaused")
-                      : t("sfxLaneMusicHint")}
+                <div className="sfx-player-stage-fg">
+                <div className="sfx-player-title">
+                  {bgm.path ? bgmName : t("sfxBgmPickHint")}
                 </div>
 
-                {bgm.path ? (
-                  <div
-                    className={
-                      bgm.playing && !bgm.paused
-                        ? "sfx-eq playing"
-                        : bgm.paused
-                          ? "sfx-eq paused"
-                          : "sfx-eq"
-                    }
-                    aria-hidden
-                  >
-                    {Array.from({ length: 20 }, (_, i) => (
-                      <span key={i} />
-                    ))}
+                <div
+                  className={
+                    bgm.playing && !bgm.paused
+                      ? "sfx-vinyl spinning"
+                      : bgm.paused
+                        ? "sfx-vinyl paused"
+                        : "sfx-vinyl"
+                  }
+                >
+                  <div className="sfx-vinyl-disk" aria-hidden>
+                    {settings.vinylArtDataUrl ? (
+                      <img
+                        className="sfx-vinyl-art"
+                        src={settings.vinylArtDataUrl}
+                        alt=""
+                        draggable={false}
+                      />
+                    ) : (
+                      <svg
+                        className="sfx-vinyl-face"
+                        width="112"
+                        height="112"
+                        viewBox="0 0 128 128"
+                      >
+                        <rect width="128" height="128" fill="#0a0a0a" />
+                        <circle cx="20" cy="20" r="1.5" fill="#fff" opacity="0.55" />
+                        <circle cx="40" cy="30" r="1.5" fill="#fff" opacity="0.4" />
+                        <circle cx="60" cy="10" r="1.5" fill="#fff" opacity="0.5" />
+                        <circle cx="80" cy="40" r="1.5" fill="#fff" opacity="0.35" />
+                        <circle cx="100" cy="20" r="1.5" fill="#fff" opacity="0.45" />
+                        <circle cx="110" cy="55" r="1.5" fill="#fff" opacity="0.35" />
+                        <path
+                          d="M0 128 Q32 64 64 128 T128 128"
+                          fill="var(--accent)"
+                          opacity="0.9"
+                        />
+                        <path
+                          d="M0 128 Q32 48 64 128 T128 128"
+                          fill="var(--accent)"
+                          opacity="0.7"
+                        />
+                        <path
+                          d="M0 128 Q32 32 64 128 T128 128"
+                          fill="var(--accent)"
+                          opacity="0.55"
+                        />
+                        <path
+                          d="M0 128 Q16 64 32 128 T64 128"
+                          fill="var(--accent)"
+                          opacity="0.75"
+                        />
+                        <path
+                          d="M64 128 Q80 64 96 128 T128 128"
+                          fill="var(--accent)"
+                          opacity="0.65"
+                        />
+                      </svg>
+                    )}
+                    {/* 轴心始终盖在封面之上，换图也还是唱片 */}
+                    <svg
+                      className="sfx-vinyl-spindle"
+                      width="112"
+                      height="112"
+                      viewBox="0 0 128 128"
+                    >
+                      <circle cx="64" cy="64" r="14" fill="#141414" />
+                      <circle cx="64" cy="64" r="9" fill="var(--accent)" />
+                      <circle cx="64" cy="64" r="3.5" fill="#f2f2f2" />
+                    </svg>
                   </div>
-                ) : null}
+                  <button
+                    type="button"
+                    className="sfx-vinyl-edit"
+                    title={t("sfxVinylArtChange")}
+                    aria-label={t("sfxVinylArtChange")}
+                    onClick={() => void pickVinylArt()}
+                  >
+                    <Pencil size={22} strokeWidth={1.75} absoluteStrokeWidth />
+                  </button>
+                  {settings.vinylArtDataUrl ? (
+                    <button
+                      type="button"
+                      className="sfx-vinyl-clear"
+                      title={t("sfxVinylArtClear")}
+                      aria-label={t("sfxVinylArtClear")}
+                      onClick={() =>
+                        void persist({
+                          ...settingsRef.current,
+                          vinylArtDataUrl: null,
+                        })
+                      }
+                    >
+                      ×
+                    </button>
+                  ) : null}
+                </div>
 
                 <div className="sfx-seek">
                   <span className="sfx-seek-time">
@@ -1941,11 +2066,7 @@ export default function Soundboard({
                       setSeekDrag(null);
                       void seekBgm(v);
                     }}
-                    title={
-                      bgm.durationMs
-                        ? t("sfxSeek")
-                        : t("sfxSeekUnavailable")
-                    }
+                    title={t("sfxSeek")}
                   />
                   <span className="sfx-seek-time">
                     {bgm.durationMs != null ? formatMs(bgm.durationMs) : "--:--"}
@@ -1955,11 +2076,7 @@ export default function Soundboard({
                 <div className="sfx-player-controls deck">
                   <button
                     type="button"
-                    className={
-                      settings.loopMode === "loopList"
-                        ? "sfx-player-btn ghost on"
-                        : "sfx-player-btn ghost"
-                    }
+                    className="sfx-player-btn ghost"
                     title={
                       settings.loopMode === "loopList"
                         ? t("sfxLoopList")
@@ -2007,14 +2124,14 @@ export default function Soundboard({
                     }
                   >
                     {bgm.playing ? (
-                      <Pause size={28} strokeWidth={0} absoluteStrokeWidth fill="currentColor" />
+                      <Pause size={22} strokeWidth={0} absoluteStrokeWidth fill="currentColor" />
                     ) : (
                       <Play
-                        size={28}
+                        size={22}
                         strokeWidth={0}
                         absoluteStrokeWidth
                         fill="currentColor"
-                        style={{ marginLeft: 3 }}
+                        style={{ marginLeft: 2 }}
                       />
                     )}
                   </button>
@@ -2029,15 +2146,19 @@ export default function Soundboard({
                   </button>
                   <button
                     type="button"
-                    className="sfx-player-btn ghost"
-                    title={t("sfxBgmShowList")}
+                    className={
+                      settings.loopMode === "shuffle"
+                        ? "sfx-player-btn ghost on"
+                        : "sfx-player-btn ghost"
+                    }
+                    title={t("sfxShuffle")}
                     onClick={() =>
-                      document
-                        .getElementById("sfx-bgm-list")
-                        ?.scrollIntoView({ behavior: "smooth", block: "nearest" })
+                      void onLoopMode(
+                        settings.loopMode === "shuffle" ? "loopOne" : "shuffle",
+                      )
                     }
                   >
-                    <ListMusic size={22} strokeWidth={1.75} absoluteStrokeWidth />
+                    <Shuffle size={22} strokeWidth={1.75} absoluteStrokeWidth />
                   </button>
                 </div>
 
@@ -2083,6 +2204,7 @@ export default function Soundboard({
                     onChange={(v) => void onBgmVolume(v)}
                   />
                 </div>
+                </div>
               </div>
               <div className="sfx-player-list" id="sfx-bgm-list">
                 <div className="sfx-player-list-head">
@@ -2113,12 +2235,7 @@ export default function Soundboard({
                           </span>
                           <span className="sfx-track-body">
                             <span className="sfx-track-name">{padLabel(e)}</span>
-                            <span className="sfx-track-meta">
-                              {e.category}
-                              {on
-                                ? ` · ${bgm.paused ? t("sfxBgmPaused") : t("sfxBgmLooping")}`
-                                : ""}
-                            </span>
+                            <span className="sfx-track-meta">{e.category}</span>
                           </span>
                           <span className="sfx-track-time">
                             {e.durationMs != null ? formatMs(e.durationMs) : ""}
@@ -2615,6 +2732,27 @@ export default function Soundboard({
         )}
 
       <ContextMenu menu={ctx} onClose={() => setCtx(null)} />
+      {vinylCropSrc ? (
+        <ImageCropModal
+          src={vinylCropSrc}
+          onCancel={() => {
+            if (vinylCropSrc.startsWith("blob:")) {
+              URL.revokeObjectURL(vinylCropSrc);
+            }
+            setVinylCropSrc(null);
+          }}
+          onConfirm={(dataUrl) => {
+            if (vinylCropSrc.startsWith("blob:")) {
+              URL.revokeObjectURL(vinylCropSrc);
+            }
+            setVinylCropSrc(null);
+            void persist({
+              ...settingsRef.current,
+              vinylArtDataUrl: dataUrl,
+            });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

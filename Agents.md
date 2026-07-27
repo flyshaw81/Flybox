@@ -33,7 +33,16 @@
 5. 启动一次，确认进程起来
 6. 汇报打勾：打包完成 / 已安装 / 已启动 / **安装包路径** / 本机安装路径 / **新版本号**
 
+## DarkVeil 跟强调色（已校准）
+
+背景音乐舞台用 React Bits `DarkVeil`，**换色只走 `hueShift`**（见 `src/DarkVeil.tsx` / `.cursor/rules/darkveil-accent.mdc`）。
+
+- 读 CSS `--accent` → `hueShiftFromAccentVar()`
+- 公式：`shift = 290 - accentHue + (-40)`，再夹到 `[-180, 180]`（正向偏绿，负向暖色；`-40` 把爱马仕橙从偏红扳正）
+- **禁止**再上 accent 混色 / HSV 硬染；要微调颜色只动 `VEIL_BASE_HUE` / `WARM_BIAS`
+
 ## 其它
 
 - 用户没点名的事不要做；发现可优化先问
 - 用户完全不懂代码：运维/报错在已授权任务内直接做完，用人话汇报
+- 播放台界面勿堆「循环中 / 淡变中」等工程化状态文案

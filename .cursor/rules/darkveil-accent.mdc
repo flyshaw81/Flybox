@@ -1,0 +1,32 @@
+---
+description: DarkVeil 背景光效如何跟随强调色（已校准，勿乱改）
+globs: src/DarkVeil.tsx,src/brandColors.ts,src/Soundboard.tsx
+alwaysApply: false
+---
+
+# DarkVeil × 强调色
+
+React Bits 的 `DarkVeil` **只靠 `hueShift` 换色**，不要再用「混一层 accent / HSV 硬染」——会把暗部染脏，或算出绿/红偏色。
+
+## 正确模式（已落在 `src/DarkVeil.tsx`）
+
+1. Fragment 保持官网原版（`hueShiftRGB` + scan/noise/warp）。
+2. 不传 `hueShift` 时，每帧读 CSS `--accent`，用 `hueShiftFromAccentVar()` 算出偏移。
+3. 公式（**符号与偏置已经目视校准，改前先问用户**）：
+
+```ts
+const VEIL_BASE_HUE = 290; // hueShift=0 时官网紫
+const WARM_BIAS = -40;     // 爱马仕橙目视微调：裸算偏红时再往橙推
+// 正方向 → 青绿；暖色必须走「基准 − 强调色」负向
+shift = VEIL_BASE_HUE - accentHueDeg + WARM_BIAS
+// 再归一到 [-180, 180]
+```
+
+4. 爱马仕橙 `#ff6a00` 在此校准下为「对了」；若以后偏绿/偏红，只微调 `WARM_BIAS` 或 `VEIL_BASE_HUE`，不要重写着色管线。
+5. 舞台用法对齐官网默认：`speed={0.5}`，`warpAmount={0}`，其余强度 0；容器用 `ResizeObserver` 设画布尺寸（勿只听 window resize）。
+
+## 禁止
+
+- `uAccent` / `accentMix` 整块 mix 进 shader 暗部
+- 把 `hueShift` 写死成 0 却指望背景跟强调色
+- 在设置页或别处再抄一套未校准的色相公式

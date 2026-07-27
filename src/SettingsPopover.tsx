@@ -4,17 +4,26 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useI18n } from "./i18n";
 import { useTheme, type ThemeMode } from "./theme";
 import { APP_VERSION_LABEL } from "./appVersion";
+import {
+  DEFAULT_ACCENT,
+  DEFAULT_ASSIST,
+  normalizeHex,
+} from "./brandColors";
 
 export type AppSettings = {
   restoreVault: boolean;
   deepScanDefault: boolean;
   startMinimized: boolean;
+  accentColor: string;
+  assistColor: string;
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   restoreVault: true,
   deepScanDefault: false,
   startMinimized: false,
+  accentColor: DEFAULT_ACCENT,
+  assistColor: DEFAULT_ASSIST,
 };
 
 type Props = {
@@ -57,6 +66,41 @@ function SwitchRow({
       </span>
       <span className="sr-only">{on ? t("settingsOn") : t("settingsOff")}</span>
     </button>
+  );
+}
+
+function ColorRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (hex: string) => void;
+}) {
+  return (
+    <label className="settings-color-row">
+      <span className="settings-row-text">
+        <span className="settings-row-label">{label}</span>
+      </span>
+      <span className="settings-color-controls">
+        <input
+          type="color"
+          className="settings-color-swatch"
+          value={normalizeHex(value, DEFAULT_ACCENT)}
+          onChange={(e) => onChange(normalizeHex(e.target.value, DEFAULT_ACCENT))}
+        />
+        <input
+          className="settings-color-hex"
+          value={value}
+          spellCheck={false}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={(e) =>
+            onChange(normalizeHex(e.target.value, normalizeHex(value, DEFAULT_ACCENT)))
+          }
+        />
+      </span>
+    </label>
   );
 }
 
@@ -154,6 +198,20 @@ export default function SettingsPopover({
               {t("settingsThemeLight")}
             </button>
           </div>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-label">{t("settingsColors")}</div>
+          <ColorRow
+            label={t("settingsAccent")}
+            value={settings.accentColor}
+            onChange={(hex) => patch({ accentColor: hex })}
+          />
+          <ColorRow
+            label={t("settingsAssist")}
+            value={settings.assistColor}
+            onChange={(hex) => patch({ assistColor: hex })}
+          />
         </div>
 
         <div className="settings-section">
