@@ -4,8 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { AppWindow, LogIn, RefreshCw } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { ModuleChrome } from "../App";
-import LiveMonitor from "./LiveMonitor";
+import LiveBoard from "./LiveBoard";
 import LiveOverview from "./LiveOverview";
+import LiveSpeederLoader from "./LiveSpeederLoader";
 import SessionDetail from "./SessionDetail";
 import { classifyLiveUrl, SCRAPE_SCRIPT } from "./scraper";
 import {
@@ -40,6 +41,7 @@ type Props = {
 };
 
 type View = "overview" | "monitor" | "detail";
+type Section = "analysis" | "live";
 
 const SCRAPE_MS = 10_000;
 /** 历史列表多久内算新鲜，进模块不再全量重拉 */
@@ -102,12 +104,15 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     },
   });
   const [view, setView] = useState<View>("overview");
+  const [section, setSection] = useState<Section>("analysis");
   const [detailId, setDetailId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [needRelogin, setNeedRelogin] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [historySyncing, setHistorySyncing] = useState(false);
+  /** 扫码登录成功后，第一次抓历史/数据时的全屏飞车 loading */
+  const [fetchAfterLogin, setFetchAfterLogin] = useState(false);
   const dataRef = useRef(data);
   dataRef.current = data;
   const scrapeLock = useRef(false);
@@ -181,6 +186,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           setQrDataUrl(null);
           const cur = dataRef.current;
           if (!cur.loggedIn) {
+            setFetchAfterLogin(true);
             await persist({ ...cur, loggedIn: true });
           }
           try {
@@ -195,9 +201,10 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       }
       try {
         const q = await invoke<string | null>("live_fetch_login_qr");
-        if (!cancelled && q && q.startsWith("data:image")) {
-          setQrDataUrl(q);
-        }
+        if (cancelled) return;
+        // 无码时清空，避免把上次误抓的趋势图继续显示在二维码框里
+        if (q && q.startsWith("data:image")) setQrDataUrl(q);
+        else setQrDataUrl(null);
       } catch {
         /* 还在加载 */
       }
@@ -224,6 +231,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
         const cur = dataRef.current;
         void (async () => {
           if (!cur.loggedIn) {
+            setFetchAfterLogin(true);
             await persist({ ...cur, loggedIn: true });
           }
           try {
@@ -249,8 +257,19 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
   const applyScrape = useCallback(
     async (raw: LiveScrapeResult) => {
       if (raw.needLogin) {
-        setNeedRelogin(true);
-        return;
+        // 再向 Rust 确认一次，避免页面文案误伤把已登录态踢成「登录已失效」
+        try {
+          const auth = await invoke<{ loggedIn: boolean }>("live_auth_status");
+          if (auth.loggedIn) {
+            setNeedRelogin(false);
+          } else {
+            setNeedRelogin(true);
+            return;
+          }
+        } catch {
+          setNeedRelogin(true);
+          return;
+        }
       }
       setNeedRelogin(false);
       const status = String(raw.liveStatus || "unknown");
@@ -264,6 +283,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           active = createSession(raw.title);
           activeId = active.id;
           sessions = upsertSession(sessions, active);
+          setSection("live");
           setView("monitor");
         }
         const tSec = Math.max(0, Math.floor(Date.now() / 1000) - active.startTime);
@@ -278,15 +298,24 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           newFollowers: num(raw.newFollowers, active.newFollowers),
           newFansClub: num(raw.newFansClub, active.newFansClub),
           shares: num(raw.shares, active.totalShares),
+          show: raw.show != null ? num(raw.show) : lastPt?.show,
+          enter: raw.enter != null ? num(raw.enter) : lastPt?.enter,
+          stay: raw.stay != null ? num(raw.stay) : lastPt?.stay,
         };
         let next: LiveSession = {
           ...active,
           title: (raw.title && raw.title.trim()) || active.title,
           dataPoints: [...active.dataPoints, point],
+          showUcnt: raw.show != null ? num(raw.show) : active.showUcnt,
+          enterUcnt: raw.enter != null ? num(raw.enter) : active.enterUcnt,
+          enterRate: raw.enterRate != null ? num(raw.enterRate) : active.enterRate,
+          stayRate: raw.stayRate != null ? num(raw.stayRate) : active.stayRate,
+          giftRate: raw.giftRate != null ? num(raw.giftRate) : active.giftRate,
         };
         next = recomputeSessionStats(next);
         sessions = upsertSession(sessions, next);
         await persist({ ...cur, loggedIn: true, sessions, activeSessionId: activeId });
+        setSection("live");
         setView("monitor");
         return;
       }
@@ -296,6 +325,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
         sessions = upsertSession(sessions, done);
         await persist({ ...cur, loggedIn: true, sessions, activeSessionId: null });
         setDetailId(done.id);
+        setSection("analysis");
         setView("detail");
       }
     },
@@ -497,6 +527,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       } finally {
         historySyncLock.current = false;
         setHistorySyncing(false);
+        setFetchAfterLogin(false);
       }
     },
     [needRelogin, persist, fillGaps, runDeepSync, runPortraitSync, syncProfile],
@@ -599,6 +630,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       ? cur.sessions.find((s) => s.id === cur.activeSessionId)
       : null;
     if (!active || active.endTime != null) {
+      setSection("analysis");
       setView("overview");
       return;
     }
@@ -606,6 +638,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     const sessions = upsertSession(cur.sessions, done);
     await persist({ ...cur, sessions, activeSessionId: null });
     setDetailId(done.id);
+    setSection("analysis");
     setView("detail");
   }, [persist]);
 
@@ -624,7 +657,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     const el = shellRef.current;
     if (!el) return;
     el.scrollTop = 0;
-  }, [view, detailId]);
+  }, [view, detailId, section]);
 
   useEffect(() => {
     if (!embedded || !onChromeChange) return;
@@ -661,18 +694,48 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
         </button>
       </>
     ) : null;
+    if (!data.loggedIn || needRelogin) {
+      onChromeChange({ title: t("liveData"), tools });
+      return;
+    }
+    const meta =
+      section === "live" && activeSession
+        ? t("liveMetaLive")
+        : `${data.sessions.length} ${t("liveSessionsUnit")}`;
     onChromeChange({
-      title: t("liveData"),
-      meta:
-        view === "monitor" && activeSession
-          ? t("liveMetaLive")
-          : needRelogin
-            ? t("liveMetaExpired")
-            : historySyncing
-              ? t("liveSyncing")
-              : data.loggedIn
-                ? `${data.sessions.length} ${t("liveSessionsUnit")}`
-                : undefined,
+      context: (
+        <>
+          <nav className="live-chrome-tabs" role="tablist" aria-label={t("liveData")}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={section === "analysis"}
+              className={section === "analysis" ? "live-chrome-tab on" : "live-chrome-tab"}
+              onClick={() => {
+                setSection("analysis");
+                if (view === "monitor") setView("overview");
+              }}
+            >
+              {t("liveData")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={section === "live"}
+              className={section === "live" ? "live-chrome-tab on" : "live-chrome-tab"}
+              onClick={() => {
+                setSection("live");
+                setView("monitor");
+              }}
+            >
+              {t("liveLiveTab")}
+            </button>
+          </nav>
+          <span className="count-label" data-tauri-drag-region>
+            {meta}
+          </span>
+        </>
+      ),
       tools,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -681,6 +744,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     onChromeChange,
     t,
     view,
+    section,
     activeSession?.id,
     needRelogin,
     data.loggedIn,
@@ -694,6 +758,13 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     if (!embedded || !onChromeChange) return;
     return () => onChromeChange(null);
   }, [embedded, onChromeChange]);
+
+  const saveCueNoteId = useCallback(
+    (id: string | null) => {
+      void persist({ ...dataRef.current, cueNoteId: id });
+    },
+    [persist],
+  );
 
   if (booting) {
     return (
@@ -747,28 +818,66 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     );
   }
 
+  if (fetchAfterLogin) {
+    return (
+      <div className="empty live-login">
+        <LiveSpeederLoader />
+      </div>
+    );
+  }
+
   return (
     <div className="live-shell" ref={shellRef}>
       {error ? <div className="banner error">{error}</div> : null}
-      {view === "monitor" && activeSession ? (
-        <LiveMonitor
+      {section === "live" ? (
+        <LiveBoard
           session={activeSession}
           allSessions={data.sessions}
+          cueNoteId={data.cueNoteId ?? null}
+          onCueNoteId={saveCueNoteId}
+          onEndLive={() => void endLiveManual()}
           labels={{
             live: t("liveStatusLive"),
-            peak: t("liveMetricPeak"),
-            gifts: t("liveMetricGifts"),
-            followers: t("liveMetricFollowers"),
-            likes: t("liveMetricLikes"),
-            comments: t("liveMetricComments"),
-            viewersTrend: t("liveViewersTrend"),
+            idle: t("liveIdlePill"),
             endLive: t("liveEndManual"),
-            liveTip: t("liveLiveTip"),
+            heatTitle: t("liveLiveHeatTitle"),
+            viewers: t("liveMetricViewersNow"),
+            gifts: t("liveMetricGifts"),
+            senders: t("liveMetricSenders"),
+            followers: t("liveMetricFollowers"),
+            commenters: t("liveMetricCommenters"),
+            likes: t("liveMetricLikes"),
+            shares: t("liveMetricShares"),
+            fansClub: t("liveMetricFansClub"),
+            convTitle: t("liveConvTitle"),
+            modeMinute: t("liveConvModeMinute"),
+            modeTotal: t("liveConvModeTotal"),
+            showMinute: t("liveConvShowMinute"),
+            enterMinute: t("liveConvEnterMinute"),
+            stayMinute: t("liveConvStayMinute"),
+            showTotal: t("liveConvShowTotal"),
+            enterTotal: t("liveConvEnterTotal"),
+            giftTotal: t("liveConvGiftTotal"),
+            enterRate: t("liveEnterRate"),
+            stayRate: t("liveConvStayRate"),
+            giftRate: t("liveConvGiftRate"),
+            vs7: t("liveFunnelVs7"),
+            musicTitle: t("liveBoardMusic"),
+            cuePick: t("liveBoardCuePick"),
+            cueEmpty: t("liveBoardCueEmptyTitle"),
+            cueNoNotes: t("liveBoardCueNoNotes"),
+            bgmIdle: t("sfxBgmIdle"),
+            prev: t("sfxPrev"),
+            next: t("sfxNext"),
+            loopOne: t("sfxLoopOne"),
+            loopList: t("sfxLoopList"),
+            playlist: t("liveBoardPlaylist"),
+            playlistTitle: t("liveBoardPlaylistTitle"),
+            noPlaylist: t("liveBoardNoPlaylist"),
           }}
-          onEnd={() => void endLiveManual()}
         />
       ) : null}
-      {view === "detail" && detailSession ? (
+      {section === "analysis" && view === "detail" && detailSession ? (
         <SessionDetail
           session={detailSession}
           allSessions={data.sessions}
@@ -844,18 +953,17 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           }}
           onBack={() => {
             setDetailId(null);
+            setSection("analysis");
             setView("overview");
           }}
         />
       ) : null}
-      {view === "overview" || (view === "monitor" && !activeSession) ? (
+      {section === "analysis" && (view === "overview" || view === "monitor") ? (
         <LiveOverview
           sessions={data.sessions}
           goals={data.goals}
-          syncing={historySyncing}
           labels={{
             empty: t("liveListEmpty"),
-            syncing: t("liveSyncing"),
             coreTitle: t("liveCoreTitle"),
             rangeToday: t("liveRangeToday"),
             range7: t("liveRange7"),

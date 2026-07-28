@@ -45,6 +45,7 @@ export async function loadLiveStore(): Promise<LiveStoreData> {
     profile,
     lastHistorySyncAt:
       typeof raw.lastHistorySyncAt === "number" ? raw.lastHistorySyncAt : null,
+    cueNoteId: typeof raw.cueNoteId === "string" ? raw.cueNoteId : null,
   };
 }
 

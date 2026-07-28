@@ -3,6 +3,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { Check, ClipboardCopy, Download } from "lucide-react";
+import { useTheme } from "../theme";
 import LiveEChart from "./charts/LiveEChart";
 import { ageOption, channelOption, minuteOption } from "./charts/options";
 import PayFunnel from "./PayFunnel";
@@ -137,6 +138,7 @@ export default function SessionDetail({
   labels,
   onBack,
 }: Props) {
+  const { theme } = useTheme();
   const insight = useMemo(
     () => buildSessionInsight(session, allSessions),
     [session, allSessions],
@@ -173,16 +175,16 @@ export default function SessionDetail({
 
   const minuteOpt = useMemo(
     () => (minutes.length >= 2 ? minuteOption(minutes, moments) : null),
-    [minutes, moments],
+    [minutes, moments, theme],
   );
   const channelOpt = useMemo(
     () => (channels.length ? channelOption(channels) : null),
-    [channels],
+    [channels, theme],
   );
   const ageOpt = useMemo(
     () =>
       portrait?.ages && portrait.ages.length ? ageOption(portrait.ages) : null,
-    [portrait],
+    [portrait, theme],
   );
 
   async function copyReport() {

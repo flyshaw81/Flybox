@@ -18,12 +18,15 @@ export default function SfxMenuSelect({
   value,
   options,
   onChange,
+  lockValueWidth = true,
 }: {
-  label: string;
+  label?: string;
   title?: string;
   value: string;
   options: SfxMenuOption[];
   onChange: (value: string) => void;
+  /** 为 false 时按当前文案自适应宽度（记事本标题等长文本） */
+  lockValueWidth?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [valueWidth, setValueWidth] = useState<number | null>(null);
@@ -36,6 +39,10 @@ export default function SfxMenuSelect({
   const current = options.find((o) => o.value === value) ?? options[0];
 
   useLayoutEffect(() => {
+    if (!lockValueWidth) {
+      setValueWidth(null);
+      return;
+    }
     const host = measureRef.current;
     if (!host) return;
     let max = 0;
@@ -43,7 +50,7 @@ export default function SfxMenuSelect({
       max = Math.max(max, (node as HTMLElement).offsetWidth);
     }
     if (max > 0) setValueWidth(max);
-  }, [options]);
+  }, [options, lockValueWidth]);
 
   const placeMenu = () => {
     const btn = btnRef.current;
@@ -135,7 +142,7 @@ export default function SfxMenuSelect({
 
   return (
     <div className="sfx-menu-select" ref={rootRef} title={title}>
-      <span className="sfx-menu-select-label">{label}</span>
+      {label ? <span className="sfx-menu-select-label">{label}</span> : null}
       <div className="sfx-menu-select-field">
         <button
           ref={btnRef}

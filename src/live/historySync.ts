@@ -298,49 +298,6 @@ export function mergeHistorySessions(
   return next.sort((a, b) => b.startTime - a.startTime);
 }
 
-export type LiveSummary = {
-  sessionCount: number;
-  totalDuration: number;
-  totalGifts: number;
-  totalFollowers: number;
-  peakViewers: number;
-  avgGifts: number;
-  last7Gifts: number;
-  prev7Gifts: number;
-  giftsGrowthPct: number | null;
-};
-
-export function computeLiveSummary(sessions: LiveSession[]): LiveSummary {
-  const list = sessions;
-  const sessionCount = list.length;
-  const totalDuration = list.reduce((s, x) => s + (x.duration || 0), 0);
-  const totalGifts = list.reduce((s, x) => s + x.totalGifts, 0);
-  const totalFollowers = list.reduce((s, x) => s + x.newFollowers, 0);
-  const peakViewers = list.reduce((m, x) => Math.max(m, x.peakViewers), 0);
-  const avgGifts = sessionCount ? Math.round(totalGifts / sessionCount) : 0;
-
-  const now = Date.now() / 1000;
-  const d7 = 7 * 86400;
-  const last7 = list.filter((s) => s.startTime >= now - d7);
-  const prev7 = list.filter((s) => s.startTime >= now - 2 * d7 && s.startTime < now - d7);
-  const last7Gifts = last7.reduce((s, x) => s + x.totalGifts, 0);
-  const prev7Gifts = prev7.reduce((s, x) => s + x.totalGifts, 0);
-  const giftsGrowthPct =
-    prev7Gifts > 0 ? ((last7Gifts - prev7Gifts) / prev7Gifts) * 100 : null;
-
-  return {
-    sessionCount,
-    totalDuration,
-    totalGifts,
-    totalFollowers,
-    peakViewers,
-    avgGifts,
-    last7Gifts,
-    prev7Gifts,
-    giftsGrowthPct,
-  };
-}
-
 /** 首页核心数据周期：今日 / 近7日 / 近30日 */
 export type PeriodKey = "today" | "7d" | "30d";
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTheme } from "../theme";
 import type { LiveGoals, LiveProfile, LiveSession } from "./liveTypes";
 import {
   computePeriodCore,
@@ -50,10 +51,8 @@ type Props = {
   sessions: LiveSession[];
   goals?: LiveGoals;
   profile?: LiveProfile | null;
-  syncing?: boolean;
   labels: {
     empty: string;
-    syncing: string;
     coreTitle: string;
     rangeToday: string;
     range7: string;
@@ -105,11 +104,11 @@ export default function LiveOverview({
   sessions,
   goals,
   profile,
-  syncing,
   labels,
   onOpen,
   onGoalsChange,
 }: Props) {
+  const { theme } = useTheme();
   const [period, setPeriod] = useState<PeriodKey>("30d");
   const [range, setRange] = useState<RangeKey>("30d");
   const [sort, setSort] = useState<SortKey>("date");
@@ -122,7 +121,7 @@ export default function LiveOverview({
       core.dailyGifts.some((d) => d.gifts > 0)
         ? dailyGiftsOption(core.dailyGifts)
         : null,
-    [core.dailyGifts],
+    [core.dailyGifts, theme],
   );
   const insights = useMemo(() => buildOverviewInsights(sessions), [sessions]);
   const advice = useMemo(() => buildSlotAdvice(sessions), [sessions]);
@@ -171,10 +170,6 @@ export default function LiveOverview({
 
   return (
     <div className="live-overview">
-      {syncing ? (
-        <p className="muted live-overview-hint">{labels.syncing}</p>
-      ) : null}
-
       <div className="live-anchor-card">
         <aside className="live-anchor-aside">
           {showAvatar ? (
@@ -361,7 +356,7 @@ export default function LiveOverview({
 
       {sessions.length === 0 ? (
         <div className="empty live-empty-list">
-          <p className="muted">{syncing ? labels.syncing : labels.empty}</p>
+          <p className="muted">{labels.empty}</p>
         </div>
       ) : (
         <div className="live-list-block">

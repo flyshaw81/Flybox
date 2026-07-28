@@ -10,6 +10,10 @@ export type LiveDataPoint = {
   newFollowers?: number;
   newFansClub?: number;
   shares?: number;
+  /** 中控「流量转化」曝光 / 进入 / 停留（累计口径，由采集写入） */
+  show?: number;
+  enter?: number;
+  stay?: number;
 };
 
 /** 抖音 overview_v3 深采字段（可选） */
@@ -22,6 +26,9 @@ export type LiveSessionDeep = {
   consumeRate?: number;
   showUcnt?: number;
   earnScoreDiff?: number;
+  /** 直播中控实时：停留率 / 送礼率（%） */
+  stayRate?: number;
+  giftRate?: number;
 };
 
 /** 抖音复盘「观众画像 / 全部观众」 */
@@ -150,6 +157,12 @@ export type LiveScrapeResult = {
   comments?: number | null;
   likes?: number | null;
   shares?: number | null;
+  show?: number | null;
+  enter?: number | null;
+  stay?: number | null;
+  enterRate?: number | null;
+  stayRate?: number | null;
+  giftRate?: number | null;
   error?: string;
 };
 
@@ -171,4 +184,6 @@ export type LiveStoreData = {
   profile?: LiveProfile | null;
   /** unix 秒：上次成功拉历史列表的时间；用于进模块跳过全量重采 */
   lastHistorySyncAt?: number | null;
+  /** LIVE 工作台固定打开的记事本题词 */
+  cueNoteId?: string | null;
 };

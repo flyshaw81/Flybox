@@ -51,19 +51,54 @@ const CLICK_REVIEW_FLOW: &str = r#"(function(){
 })()"#;
 
 const FETCH_QR_SCRIPT: &str = r#"(function(){
+  function pageWantsQr() {
+    var h = String(location.href || '').toLowerCase();
+    var t = ((document.body && (document.body.innerText || document.body.textContent)) || '').slice(0, 4000);
+    var onAuth = /passport|\/login|sso|qrcode|scan-code|scan_code/.test(h);
+    var scanning = /扫码登录|打开抖音扫一扫|请使用抖音扫码|手机抖音扫码/.test(t);
+    var appShell = /数据中心|直播热度|流量转化|在线人数|收获音浪|直播数据|本场数据|实时数据/.test(t);
+    if (appShell && !scanning) return false;
+    if (/\/anchor\/(dashboard|review)/.test(h) && !scanning && !onAuth) return false;
+    return onAuth || scanning || !appShell;
+  }
+  if (!pageWantsQr()) {
+    try { window.__flyboxLoginQr = null; } catch (e) {}
+    return null;
+  }
   if (typeof window.__flyboxLoginQr === 'string' && window.__flyboxLoginQr.length > 100) {
     return window.__flyboxLoginQr;
+  }
+  function ancestryLooksLikeChart(el) {
+    var p = el;
+    for (var i = 0; i < 6 && p; i++) {
+      var sig = (String(p.className || '') + ' ' + String(p.id || '')).toLowerCase();
+      if (/chart|echart|trend|graph|highcharts|canvas-container|g2-/.test(sig)) return true;
+      p = p.parentElement;
+    }
+    return false;
+  }
+  function isLikelyQr(el) {
+    if (!el || ancestryLooksLikeChart(el)) return false;
+    var r = el.getBoundingClientRect();
+    var w = r.width, h = r.height;
+    if (w < 96 || h < 96 || w > 420 || h > 420) return false;
+    var ratio = w / h;
+    if (ratio < 0.8 || ratio > 1.25) return false;
+    var sig = (String(el.className || '') + ' ' + String(el.id || '') + ' ' + String(el.src || '')).toLowerCase();
+    return /qr|qrcode|login.?code/.test(sig) || (w >= 120 && h >= 120 && w <= 360 && h <= 360);
   }
   function findQr() {
     var nodes = Array.prototype.slice.call(document.querySelectorAll(
       'canvas, img[src*="qr"], img[src*="QR"], [class*="qrcode"], [class*="qr-code"], [class*="QRCode"], [id*="qrcode"]'
     ));
-    var best = null, bestArea = 0;
+    var best = null, bestScore = 0;
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
+      if (!isLikelyQr(el)) continue;
       var r = el.getBoundingClientRect();
-      var area = r.width * r.height;
-      if (r.width >= 72 && r.height >= 72 && area > bestArea) { best = el; bestArea = area; }
+      var sig = (String(el.className || '') + ' ' + String(el.id || '') + ' ' + String(el.src || '')).toLowerCase();
+      var score = (/qr|qrcode/.test(sig) ? 1e7 : 0) + r.width * r.height;
+      if (score > bestScore) { best = el; bestScore = score; }
     }
     return best;
   }
@@ -208,7 +243,9 @@ async fn page_says_need_login(w: &WebviewWindow) -> Option<bool> {
     let script = r#"(function(){
       var t = ((document.body && (document.body.innerText || document.body.textContent)) || "").slice(0, 4000);
       var h = String(location.href || "").toLowerCase();
-      if (/passport|\/login|sso|qrcode/.test(h)) return true;
+      var appShell = /数据中心|直播热度|流量转化|在线人数|收获音浪|直播数据|本场数据|实时数据/.test(t);
+      if (appShell) return false;
+      if (/passport|\/login|sso|qrcode|scan-code|scan_code/.test(h)) return true;
       if (/扫码登录|打开抖音扫一扫|请使用抖音扫码|手机抖音扫码/.test(t)) return true;
       if (/直播服务平台/.test(t) && /登录|扫码/.test(t) && !/数据中心|实时数据|本场数据/.test(t)) return true;
       return false;
@@ -363,14 +400,15 @@ pub async fn live_auth_status(app: AppHandle) -> Result<LiveAuthStatus, String> 
     let (need_url, logged_url) = classify_url(&url);
     let page_need = page_says_need_login(&w).await;
 
-    // 正向确认：已在 dashboard 且页面不再是扫码文案
+    // 正向确认：已在主播后台且页面不再是扫码文案
     let script = r#"(function(){
       var h = String(location.href || "").toLowerCase();
       var t = ((document.body && (document.body.innerText || document.body.textContent)) || "").slice(0, 5000);
-      var onDash = h.indexOf('/anchor/dashboard') >= 0;
+      var onAnchor = h.indexOf('anchor.douyin.com') >= 0 && h.indexOf('/anchor/') >= 0
+        && !/passport|\/login|sso|qrcode|scan-code|scan_code/.test(h);
       var scanning = /扫码登录|打开抖音扫一扫|请使用抖音扫码|手机抖音扫码/.test(t);
-      var appShell = /数据中心|直播数据|实时|开播|场次|音浪|观众/.test(t);
-      return onDash && !scanning && (appShell || !/直播服务平台·主播版/.test(t.replace(/\s/g,'')));
+      var appShell = /数据中心|直播热度|流量转化|在线人数|收获音浪|直播数据|实时|开播|场次|音浪|观众/.test(t);
+      return onAnchor && !scanning && (appShell || h.indexOf('/anchor/dashboard') >= 0 || h.indexOf('/anchor/review') >= 0);
     })()"#;
     let page_logged = match eval_string_bool(&w, script).await {
         Ok(Some(v)) => v,
