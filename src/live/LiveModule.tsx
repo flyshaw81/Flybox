@@ -186,7 +186,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           setQrDataUrl(null);
           const cur = dataRef.current;
           if (!cur.loggedIn) {
-            setFetchAfterLogin(true);
+            // 本地已有场次时不要挡整屏；只在第一次空库抓数时飞车
+            if (cur.sessions.length === 0) setFetchAfterLogin(true);
             await persist({ ...cur, loggedIn: true });
           }
           try {
@@ -231,7 +232,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
         const cur = dataRef.current;
         void (async () => {
           if (!cur.loggedIn) {
-            setFetchAfterLogin(true);
+            if (cur.sessions.length === 0) setFetchAfterLogin(true);
             await persist({ ...cur, loggedIn: true });
           }
           try {
@@ -488,6 +489,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       setError(null);
       try {
         if (fresh) {
+          // 本地已有数据：立刻收起飞车，后台补缺
+          setFetchAfterLogin(false);
           if (profileIncomplete(dataRef.current.profile)) {
             await syncProfile();
           }
@@ -516,6 +519,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           sessions,
           lastHistorySyncAt: Math.floor(Date.now() / 1000),
         });
+        // 列表到手就进分析页，深采/画像后台继续，别挡整屏
+        setFetchAfterLogin(false);
         portraitAttempts.current = 0;
         if (profileIncomplete(dataRef.current.profile)) {
           await syncProfile();
@@ -818,7 +823,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     );
   }
 
-  if (fetchAfterLogin) {
+  // 仅首次空库抓数时全屏飞车；已有场次绝不挡界面
+  if (fetchAfterLogin && data.sessions.length === 0) {
     return (
       <div className="empty live-login">
         <LiveSpeederLoader />
