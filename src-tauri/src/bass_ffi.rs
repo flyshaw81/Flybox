@@ -108,6 +108,8 @@ fn dll_search_dirs() -> Vec<PathBuf> {
         if let Some(dir) = exe.parent() {
             dirs.push(dir.to_path_buf());
             dirs.push(dir.join("bass"));
+            // NSIS/正式安装：resources 落在 exe 旁的 vendor/bass/
+            dirs.push(dir.join("vendor").join("bass"));
             // target/debug -> src-tauri/vendor/bass
             if let Some(target) = dir.parent() {
                 if let Some(src_tauri) = target.parent() {

@@ -1,6 +1,7 @@
 //! Locate bundled ffmpeg/ffprobe and run probe/transcode helpers.
 
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -10,6 +11,8 @@ fn search_dirs() -> Vec<PathBuf> {
         if let Some(dir) = exe.parent() {
             dirs.push(dir.to_path_buf());
             dirs.push(dir.join("ffmpeg"));
+            // NSIS/正式安装：resources 落在 exe 旁的 vendor/ffmpeg/
+            dirs.push(dir.join("vendor").join("ffmpeg"));
             if let Some(target) = dir.parent() {
                 if let Some(src_tauri) = target.parent() {
                     dirs.push(src_tauri.join("vendor").join("ffmpeg"));
@@ -33,6 +36,18 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Spawn ffmpeg/ffprobe without flashing a console window on Windows GUI apps.
+fn tool_cmd(program: impl AsRef<OsStr>) -> Command {
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeInfo {
@@ -45,7 +60,7 @@ pub struct ProbeInfo {
 pub fn probe(path: &Path) -> Result<ProbeInfo, String> {
     let ffprobe = find_tool("ffprobe.exe").or_else(|| find_tool("ffprobe"))
         .ok_or_else(|| "找不到 ffprobe.exe（请放到 vendor/ffmpeg）".to_string())?;
-    let out = Command::new(ffprobe)
+    let out = tool_cmd(ffprobe)
         .args([
             "-v",
             "quiet",
@@ -150,7 +165,7 @@ pub fn export_range(
         "pcm_s16le".into(),
         dest.to_string_lossy().into_owned(),
     ]);
-    let out = Command::new(ffmpeg)
+    let out = tool_cmd(ffmpeg)
         .args(&args)
         .output()
         .map_err(|e| format!("运行 ffmpeg 失败: {e}"))?;
@@ -243,7 +258,7 @@ pub fn mix_timeline(parts: &[(PathBuf, u64)], dest: &Path) -> Result<(), String>
         dest.to_string_lossy().into_owned(),
     ]);
 
-    let out = Command::new(ffmpeg)
+    let out = tool_cmd(ffmpeg)
         .args(&args)
         .output()
         .map_err(|e| format!("运行 ffmpeg 失败: {e}"))?;
@@ -283,7 +298,7 @@ pub fn concat_wavs(parts: &[PathBuf], dest: &Path) -> Result<(), String> {
         list.push_str("'\n");
     }
     std::fs::write(&list_path, list).map_err(|e| format!("写拼接列表失败: {e}"))?;
-    let out = Command::new(ffmpeg)
+    let out = tool_cmd(ffmpeg)
         .args([
             "-y",
             "-f",
@@ -321,7 +336,7 @@ pub fn transcode_to_mp3(src: &Path, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let out = Command::new(ffmpeg)
+    let out = tool_cmd(ffmpeg)
         .args([
             "-y",
             "-i",
@@ -384,7 +399,7 @@ pub fn waveform_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, String> {
     let ffmpeg = find_tool("ffmpeg.exe")
         .or_else(|| find_tool("ffmpeg"))
         .ok_or_else(|| "找不到 ffmpeg.exe".to_string())?;
-    let out = Command::new(ffmpeg)
+    let out = tool_cmd(ffmpeg)
         .args([
             "-v",
             "error",
