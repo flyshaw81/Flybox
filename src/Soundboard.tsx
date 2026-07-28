@@ -1059,9 +1059,14 @@ export default function Soundboard({
     await importAudioPaths(Array.isArray(picked) ? picked : [picked]);
   }, [importAudioPaths, t]);
 
+  // 用 ref 挂处理函数，避免 importAudioPaths 变化时反复 unlisten，拖到一半丢 drop
+  const importAudioPathsRef = useRef(importAudioPaths);
+  importAudioPathsRef.current = importAudioPaths;
+
   useEffect(() => {
     if (!ready || !settings.libraryPath) return;
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     const toClient = (pos: { x: number; y: number }) => {
       const dpr = window.devicePixelRatio || 1;
       return { x: pos.x / dpr, y: pos.y / dpr };
@@ -1093,21 +1098,28 @@ export default function Soundboard({
           setDragOver(false);
           const c = toClient(p.position);
           studioDropApiRef.current?.setOsHover(null);
-          void importAudioPaths(
-            p.paths,
+          const paths = Array.isArray(p.paths) ? p.paths : [];
+          if (paths.length === 0) return;
+          void importAudioPathsRef.current(
+            paths,
             settingsRef.current.tab === "studio" ? c : null,
           );
         }
       })
       .then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
         unlisten = fn;
       });
     return () => {
+      cancelled = true;
       unlisten?.();
       setDragOver(false);
       studioDropApiRef.current?.setOsHover(null);
     };
-  }, [ready, settings.libraryPath, importAudioPaths]);
+  }, [ready, settings.libraryPath]);
 
   const onMasterVolume = useCallback(
     async (v: number) => {

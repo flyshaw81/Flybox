@@ -722,13 +722,18 @@ export default function SfxStudioMontage({
   }, [t]);
 
   const ingestingRef = useRef(false);
+  const pendingIncomingRef = useRef<StudioIncoming | null>(null);
 
   useEffect(() => {
-    if (!incoming?.paths.length || ingestingRef.current) return;
-    const batch = incoming;
-    onIncomingConsumed();
-    ingestingRef.current = true;
-    void (async () => {
+    if (!incoming?.paths.length) return;
+    // 正在入库时先排队，避免 ingesting 锁把这一批直接丢掉
+    if (ingestingRef.current) {
+      pendingIncomingRef.current = incoming;
+      onIncomingConsumed();
+      return;
+    }
+    const run = async (batch: StudioIncoming) => {
+      ingestingRef.current = true;
       try {
         const paths = batch.paths;
         const at = batch.atMs ?? 0;
@@ -739,7 +744,7 @@ export default function SfxStudioMontage({
             tracksRef.current.some((tr) => tr.id === batch.trackId)
               ? batch.trackId
               : undefined;
-          await addPath(paths[0], undefined, tid, batch.atMs);
+          await addPath(paths[0]!, undefined, tid, batch.atMs);
           compactTracksOneEmpty();
           return;
         }
@@ -761,15 +766,23 @@ export default function SfxStudioMontage({
         setTracks(built);
 
         for (let i = 0; i < paths.length; i++) {
-          await addPath(paths[i], undefined, trackIds[i], at);
+          await addPath(paths[i]!, undefined, trackIds[i], at);
         }
         compactTracksOneEmpty();
         setActiveTrackId(trackIds[0]);
         paintPlayhead(at, true);
       } finally {
         ingestingRef.current = false;
+        const queued = pendingIncomingRef.current;
+        pendingIncomingRef.current = null;
+        if (queued?.paths.length) {
+          void run(queued);
+        }
       }
-    })();
+    };
+    const batch = incoming;
+    onIncomingConsumed();
+    void run(batch);
   }, [incoming, onIncomingConsumed, addPath, compactTracksOneEmpty, t, paintPlayhead]);
 
   const openClipMenu = (e: ReactMouseEvent, clip: TlClip) => {
@@ -1261,21 +1274,39 @@ export default function SfxStudioMontage({
     setLibDropTrack(null);
     const raw =
       e.dataTransfer.getData(LIB_MIME) || e.dataTransfer.getData("text/plain");
-    if (!raw) return;
-    let path = raw;
-    let label: string | undefined;
-    try {
-      const parsed = JSON.parse(raw) as { path?: string; label?: string };
-      if (parsed.path) {
-        path = parsed.path;
-        label = parsed.label;
+    if (raw) {
+      let path = raw.trim();
+      let label: string | undefined;
+      try {
+        const parsed = JSON.parse(raw) as { path?: string; label?: string };
+        if (parsed.path) {
+          path = parsed.path;
+          label = parsed.label;
+        }
+      } catch {
+        /* plain path */
       }
-    } catch {
-      /* plain path */
+      if (path) {
+        const at = atMsFromClientX(e.clientX);
+        paintPlayhead(at, true);
+        void addPath(path, label, trackId, at);
+        return;
+      }
     }
-    const at = atMsFromClientX(e.clientX);
-    paintPlayhead(at, true);
-    void addPath(path, label, trackId, at);
+    // 兜底：部分环境库内拖拽只带 Files / path 字段
+    const files = Array.from(e.dataTransfer.files || []);
+    for (const f of files) {
+      const p =
+        (f as File & { path?: string }).path ||
+        (f as File & { webkitRelativePath?: string }).webkitRelativePath ||
+        "";
+      if (p && /\.(mp3|wav|flac|ogg|m4a|aac|wma|opus|webm|aiff|ape|ac3|mka)$/i.test(p)) {
+        const at = atMsFromClientX(e.clientX);
+        paintPlayhead(at, true);
+        void addPath(p, undefined, trackId, at);
+        return;
+      }
+    }
   };
 
   const clearPreviewTimers = useCallback(() => {
@@ -1596,9 +1627,10 @@ export default function SfxStudioMontage({
                 </p>
               ) : (
                 studioVisible.map((e) => (
-                  <button
+                  <div
                     key={e.path}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     className="sfx-studio-pick"
                     draggable
                     onDragStart={(ev) => {
@@ -1613,6 +1645,12 @@ export default function SfxStudioMontage({
                     onClick={() =>
                       void addPath(e.path, padLabel(e), activeTrackId)
                     }
+                    onKeyDown={(ev) => {
+                      if (ev.key === "Enter" || ev.key === " ") {
+                        ev.preventDefault();
+                        void addPath(e.path, padLabel(e), activeTrackId);
+                      }
+                    }}
                   >
                     <span className="sfx-studio-pick-name">{padLabel(e)}</span>
                     <span className="sfx-studio-pick-cat muted">
@@ -1620,7 +1658,7 @@ export default function SfxStudioMontage({
                         ? t("sfxStudioKindBgm")
                         : e.category}
                     </span>
-                  </button>
+                  </div>
                 ))
               )}
             </div>
@@ -2002,12 +2040,13 @@ export default function SfxStudioMontage({
                         startScrub(e);
                       }}
                       onDragOver={(e) => {
-                        if (
-                          ![...e.dataTransfer.types].includes(LIB_MIME) &&
-                          ![...e.dataTransfer.types].includes("text/plain")
-                        ) {
-                          return;
-                        }
+                        const types = [...e.dataTransfer.types];
+                        const ok =
+                          types.includes(LIB_MIME) ||
+                          types.includes("text/plain") ||
+                          types.includes("Files") ||
+                          types.includes("files");
+                        if (!ok) return;
                         e.preventDefault();
                         e.dataTransfer.dropEffect = "copy";
                         setLibDropTrack(tr.id);
