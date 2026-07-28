@@ -205,22 +205,56 @@ export default function DarkVeil({
     });
     const mesh = new Mesh(gl, { geometry, program });
 
-    const resize = () => {
+    let sizeDirty = false;
+    let sizeRaf = 0;
+    const applySize = () => {
+      sizeRaf = 0;
+      if (document.documentElement.classList.contains("is-resizing")) {
+        sizeDirty = true;
+        return;
+      }
+      sizeDirty = false;
       const w = Math.max(1, parent.clientWidth);
       const h = Math.max(1, parent.clientHeight);
       renderer.setSize(w * resolutionScale, h * resolutionScale);
       program.uniforms.uResolution.value.set(canvas.width, canvas.height);
     };
+    const scheduleSize = () => {
+      if (document.documentElement.classList.contains("is-resizing")) {
+        sizeDirty = true;
+        return;
+      }
+      if (sizeRaf) return;
+      sizeRaf = requestAnimationFrame(applySize);
+    };
 
-    const ro = new ResizeObserver(resize);
+    const ro = new ResizeObserver(scheduleSize);
     ro.observe(parent);
-    resize();
+    applySize();
+
+    const mo = new MutationObserver(() => {
+      if (
+        !document.documentElement.classList.contains("is-resizing") &&
+        sizeDirty
+      ) {
+        scheduleSize();
+      }
+    });
+    mo.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
 
     const start = performance.now();
     let frame = 0;
     let alive = true;
     const loop = () => {
       if (!alive) return;
+      // 拖窗口时暂停 WebGL，松手再画
+      if (document.documentElement.classList.contains("is-resizing")) {
+        frame = requestAnimationFrame(loop);
+        return;
+      }
       const p = propsRef.current;
       program.uniforms.uTime.value = ((performance.now() - start) / 1000) * p.speed;
       program.uniforms.uHueShift.value =
@@ -237,6 +271,8 @@ export default function DarkVeil({
     return () => {
       alive = false;
       cancelAnimationFrame(frame);
+      if (sizeRaf) cancelAnimationFrame(sizeRaf);
+      mo.disconnect();
       ro.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

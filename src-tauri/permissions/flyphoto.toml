@@ -297,3 +297,63 @@ commands.allow = ["midi_configure"]
 identifier = "allow-midi-send-position"
 description = "Allow sending MIDI MTC position"
 commands.allow = ["midi_send_position"]
+
+[[permission]]
+identifier = "allow-live-open-login"
+description = "Allow opening Douyin anchor login WebView"
+commands.allow = ["live_open_login"]
+
+[[permission]]
+identifier = "allow-live-bootstrap"
+description = "Allow silent live login bootstrap"
+commands.allow = ["live_bootstrap"]
+
+[[permission]]
+identifier = "allow-live-fetch-login-qr"
+description = "Allow reading login QR image from hidden WebView"
+commands.allow = ["live_fetch_login_qr"]
+
+[[permission]]
+identifier = "allow-live-auth-status"
+description = "Allow polling live login status from hidden WebView"
+commands.allow = ["live_auth_status"]
+
+[[permission]]
+identifier = "allow-live-sync-history"
+description = "Allow syncing historical live sessions from Douyin"
+commands.allow = ["live_sync_history"]
+
+[[permission]]
+identifier = "allow-live-sync-deep"
+description = "Allow deep-syncing overview metrics for recent sessions"
+commands.allow = ["live_sync_deep"]
+
+[[permission]]
+identifier = "allow-live-sync-portrait"
+description = "Allow syncing audience portrait for recent sessions"
+commands.allow = ["live_sync_portrait"]
+
+[[permission]]
+identifier = "allow-live-close-window"
+description = "Allow closing live scrape WebView"
+commands.allow = ["live_close_window"]
+
+[[permission]]
+identifier = "allow-live-hide-window"
+description = "Allow hiding live scrape WebView"
+commands.allow = ["live_hide_window"]
+
+[[permission]]
+identifier = "allow-live-show-window"
+description = "Allow showing live scrape WebView"
+commands.allow = ["live_show_window"]
+
+[[permission]]
+identifier = "allow-live-current-url"
+description = "Allow reading live scrape WebView URL"
+commands.allow = ["live_current_url"]
+
+[[permission]]
+identifier = "allow-live-scrape"
+description = "Allow evaluating scrape script in live WebView"
+commands.allow = ["live_scrape"]

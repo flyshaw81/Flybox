@@ -1,5 +1,6 @@
 mod bass_ffi;
 mod ffmpeg_util;
+mod live;
 mod midi_mtc;
 mod obs_ctrl;
 mod sfx;
@@ -706,6 +707,18 @@ pub fn run() {
                     .permission("allow-midi-status")
                     .permission("allow-midi-configure")
                     .permission("allow-midi-send-position")
+                    .permission("allow-live-open-login")
+                    .permission("allow-live-bootstrap")
+                    .permission("allow-live-fetch-login-qr")
+                    .permission("allow-live-auth-status")
+                    .permission("allow-live-sync-history")
+                    .permission("allow-live-sync-deep")
+                    .permission("allow-live-sync-portrait")
+                    .permission("allow-live-close-window")
+                    .permission("allow-live-hide-window")
+                    .permission("allow-live-show-window")
+                    .permission("allow-live-current-url")
+                    .permission("allow-live-scrape")
                     .permission("dialog:default")
                     .permission("clipboard-manager:allow-write-text")
                     .permission("clipboard-manager:allow-read-text")
@@ -810,6 +823,19 @@ pub fn run() {
             midi_mtc::midi_status,
             midi_mtc::midi_configure,
             midi_mtc::midi_send_position,
+            live::live_open_login,
+            live::live_bootstrap,
+            live::live_fetch_login_qr,
+            live::live_auth_status,
+            live::live_sync_history,
+            live::live_sync_deep,
+            live::live_sync_portrait,
+            live::live_sync_profile,
+            live::live_close_window,
+            live::live_hide_window,
+            live::live_show_window,
+            live::live_current_url,
+            live::live_scrape,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -34,7 +34,48 @@ type Props = {
   autostart: boolean;
   onAutostartChange: (on: boolean) => Promise<void>;
   autostartBusy?: boolean;
+  vaultPath: string | null;
+  onPickVault: () => void;
+  sfxLibraryPath: string | null;
+  onPickSfxLibrary: () => void;
 };
+
+function folderLabel(path: string | null): string | null {
+  if (!path) return null;
+  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function PathRow({
+  label,
+  path,
+  onPick,
+  pickLabel,
+  changeLabel,
+  unsetLabel,
+}: {
+  label: string;
+  path: string | null;
+  onPick: () => void;
+  pickLabel: string;
+  changeLabel: string;
+  unsetLabel: string;
+}) {
+  const name = folderLabel(path);
+  return (
+    <div className="settings-path-row">
+      <span className="settings-row-text">
+        <span className="settings-row-label">{label}</span>
+        <span className="settings-row-hint" title={path ?? undefined}>
+          {name ?? unsetLabel}
+        </span>
+      </span>
+      <button type="button" className="settings-path-btn" onClick={onPick}>
+        {path ? changeLabel : pickLabel}
+      </button>
+    </div>
+  );
+}
 
 function SwitchRow({
   label,
@@ -112,6 +153,10 @@ export default function SettingsPopover({
   autostart,
   onAutostartChange,
   autostartBusy,
+  vaultPath,
+  onPickVault,
+  sfxLibraryPath,
+  onPickSfxLibrary,
 }: Props) {
   const { t, locale, setLocale } = useI18n();
   const { theme, setTheme } = useTheme();
@@ -177,6 +222,26 @@ export default function SettingsPopover({
             hint={t("settingsStartMinHint")}
             on={settings.startMinimized}
             onToggle={() => patch({ startMinimized: !settings.startMinimized })}
+          />
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-label">{t("settingsLibraries")}</div>
+          <PathRow
+            label={t("settingsSfxLibrary")}
+            path={sfxLibraryPath}
+            onPick={onPickSfxLibrary}
+            pickLabel={t("sfxPickLibrary")}
+            changeLabel={t("changeFolder")}
+            unsetLabel={t("settingsPathUnset")}
+          />
+          <PathRow
+            label={t("settingsVaultPath")}
+            path={vaultPath}
+            onPick={onPickVault}
+            pickLabel={t("pickFolder")}
+            changeLabel={t("changeFolder")}
+            unsetLabel={t("settingsPathUnset")}
           />
         </div>
 

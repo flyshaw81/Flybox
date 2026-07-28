@@ -39,7 +39,6 @@ import {
   SkipBack,
   SkipForward,
   Square,
-  Trash2,
 } from "lucide-react";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import DarkVeil from "./DarkVeil";
@@ -148,6 +147,8 @@ type SfxSettings = {
 };
 
 const STORE_FILE = "sfx.json";
+/** 与 App 设置面板改曲库路径同步 */
+const SFX_LIBRARY_EVENT = "flybox-sfx-library";
 const ICO = 16;
 const AUDIO_EXT = /\.(mp3|wav|flac|ogg|m4a|aac|wma|opus|webm|aiff|ape|ac3|mka)$/i;
 const RECENT_MAX = 40;
@@ -959,7 +960,22 @@ export default function Soundboard({
     const next = { ...settingsRef.current, libraryPath: dir };
     await persist(next);
     await reloadLibrary(dir);
+    window.dispatchEvent(new CustomEvent(SFX_LIBRARY_EVENT, { detail: dir }));
   }, [persist, reloadLibrary]);
+
+  useEffect(() => {
+    const onLib = (e: Event) => {
+      const dir = (e as CustomEvent<string>).detail;
+      if (typeof dir !== "string" || !dir) return;
+      if (dir === settingsRef.current.libraryPath) return;
+      const next = { ...settingsRef.current, libraryPath: dir };
+      settingsRef.current = next;
+      setSettings(next);
+      void reloadLibrary(dir);
+    };
+    window.addEventListener(SFX_LIBRARY_EVENT, onLib);
+    return () => window.removeEventListener(SFX_LIBRARY_EVENT, onLib);
+  }, [reloadLibrary]);
 
   const importAudioPaths = useCallback(
     async (
@@ -1222,39 +1238,49 @@ export default function Soundboard({
     }
   }, [reloadLibrary, selectCategory, t]);
 
-  const renameCategory = useCallback(async () => {
-    const root = settingsRef.current.libraryPath;
-    if (!root || !category || category === RECENT_CAT || category === IMPORT_CAT) return;
-    const name = window.prompt(t("sfxCatRenamePrompt"), category);
-    if (!name?.trim() || name.trim() === category) return;
-    try {
-      await invoke("sfx_category_rename", {
-        libraryRoot: root,
-        oldName: category,
-        newName: name.trim(),
-      });
-      await reloadLibrary(root);
-      selectCategory(name.trim());
-    } catch (e) {
-    }
-  }, [category, reloadLibrary, selectCategory, t]);
+  const renameCategory = useCallback(
+    async (catName?: string) => {
+      const root = settingsRef.current.libraryPath;
+      const cat = catName ?? category;
+      if (!root || !cat || cat === RECENT_CAT || cat === IMPORT_CAT) return;
+      const name = window.prompt(t("sfxCatRenamePrompt"), cat);
+      if (!name?.trim() || name.trim() === cat) return;
+      try {
+        await invoke("sfx_category_rename", {
+          libraryRoot: root,
+          oldName: cat,
+          newName: name.trim(),
+        });
+        await reloadLibrary(root);
+        selectCategory(name.trim());
+      } catch (e) {
+      }
+    },
+    [category, reloadLibrary, selectCategory, t],
+  );
 
-  const deleteCategory = useCallback(async () => {
-    const root = settingsRef.current.libraryPath;
-    if (!root || !category || category === RECENT_CAT || category === IMPORT_CAT) return;
-    const ok = await ask(`${t("sfxCatDeleteConfirm")}\n${category}`, {
-      title: t("sfxboard"),
-      kind: "warning",
-    });
-    if (!ok) return;
-    try {
-      await invoke("sfx_category_delete", { libraryRoot: root, name: category });
-      setCategory("");
-      await persist({ ...settingsRef.current, lastCategory: null });
-      await reloadLibrary(root);
-    } catch (e) {
-    }
-  }, [category, persist, reloadLibrary, t]);
+  const deleteCategory = useCallback(
+    async (catName?: string) => {
+      const root = settingsRef.current.libraryPath;
+      const cat = catName ?? category;
+      if (!root || !cat || cat === RECENT_CAT || cat === IMPORT_CAT) return;
+      const ok = await ask(`${t("sfxCatDeleteConfirm")}\n${cat}`, {
+        title: t("sfxboard"),
+        kind: "warning",
+      });
+      if (!ok) return;
+      try {
+        await invoke("sfx_category_delete", { libraryRoot: root, name: cat });
+        if (category === cat) {
+          setCategory("");
+          await persist({ ...settingsRef.current, lastCategory: null });
+        }
+        await reloadLibrary(root);
+      } catch (e) {
+      }
+    },
+    [category, persist, reloadLibrary, t],
+  );
 
   const onDevice = useCallback(
     async (name: string) => {
@@ -1351,27 +1377,6 @@ export default function Soundboard({
 
   const tools: ReactNode = (
     <>
-      <button type="button" className="icon-btn" title={t("sfxPickLibrary")} onClick={() => void pickLibrary()}>
-        <FolderOpen size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
-      <button
-        type="button"
-        className="icon-btn"
-        title={t("sfxImport")}
-        disabled={!settings.libraryPath}
-        onClick={() => void importFiles()}
-      >
-        <FolderPlus size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
-      <button
-        type="button"
-        className="icon-btn"
-        title={t("refresh")}
-        disabled={!settings.libraryPath || loading}
-        onClick={() => void reloadLibrary(settings.libraryPath)}
-      >
-        <RefreshCw size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
       <button type="button" className="icon-btn" title={t("sfxStopAll")} onClick={() => void stopAll()}>
         <Square size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
@@ -1717,24 +1722,19 @@ export default function Soundboard({
                   <button
                     type="button"
                     className="sfx-cat-tool"
-                    title={t("sfxCatRename")}
-                    disabled={
-                      !category || category === RECENT_CAT || category === IMPORT_CAT
-                    }
-                    onClick={() => void renameCategory()}
+                    title={t("sfxImport")}
+                    onClick={() => void importFiles()}
                   >
-                    <Pencil size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    <FolderPlus size={15} strokeWidth={1.75} absoluteStrokeWidth />
                   </button>
                   <button
                     type="button"
-                    className="sfx-cat-tool danger"
-                    title={t("sfxCatDelete")}
-                    disabled={
-                      !category || category === RECENT_CAT || category === IMPORT_CAT
-                    }
-                    onClick={() => void deleteCategory()}
+                    className="sfx-cat-tool"
+                    title={t("refresh")}
+                    disabled={loading}
+                    onClick={() => void reloadLibrary(settings.libraryPath)}
                   >
-                    <Trash2 size={14} strokeWidth={1.75} absoluteStrokeWidth />
+                    <RefreshCw size={15} strokeWidth={1.75} absoluteStrokeWidth />
                   </button>
                 </div>
                 <button
@@ -1781,6 +1781,26 @@ export default function Soundboard({
                     type="button"
                     className={!searching && category === c ? "sfx-cat on" : "sfx-cat"}
                     onClick={() => selectCategory(c)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openCtxMenu(
+                        e,
+                        [
+                          {
+                            id: "rename-cat",
+                            label: t("sfxCatRename"),
+                            onClick: () => void renameCategory(c),
+                          },
+                          {
+                            id: "delete-cat",
+                            label: t("sfxCatDelete"),
+                            onClick: () => void deleteCategory(c),
+                          },
+                        ],
+                        setCtx,
+                      );
+                    }}
                   >
                     <span className="sfx-cat-label">{c}</span>
                     <span className="sfx-cat-count">{catCounts.get(c) ?? 0}</span>

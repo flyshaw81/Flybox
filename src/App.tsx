@@ -28,11 +28,13 @@ import {
   Trash2,
   ArrowLeft,
   AudioLines,
+  ChartColumn,
   X,
 } from "lucide-react";
 import Passbox from "./Passbox";
 import Notepad from "./Notepad";
 import Soundboard from "./Soundboard";
+import LiveModule from "./LiveModule";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { LangButton, useI18n } from "./i18n";
 import { ThemeButton, useTheme } from "./theme";
@@ -106,6 +108,9 @@ function isVideoEntry(img: ImageEntry): boolean {
 type ViewMode = "grid" | "waterfall";
 
 const STORE_FILE = "settings.json";
+const SFX_STORE_FILE = "sfx.json";
+/** 设置里改曲库时与 Soundboard 同步 */
+const SFX_LIBRARY_EVENT = "flybox-sfx-library";
 const VAULT_KEY = "vaultPath";
 const RESTORE_VAULT_KEY = "restoreVault";
 const DEEP_DEFAULT_KEY = "deepScanDefault";
@@ -690,7 +695,7 @@ export default function App() {
     setScrollRoot(node);
   }, []);
   /** 四大模块：图库 / 密码箱 / 记事本 / 音效 */
-  type AppModule = "gallery" | "passbox" | "notepad" | "sfx";
+  type AppModule = "gallery" | "passbox" | "notepad" | "sfx" | "live";
   const [appModule, setAppModule] = useState<AppModule>("gallery");
   const [moduleChrome, setModuleChrome] = useState<ModuleChrome | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
@@ -702,6 +707,7 @@ export default function App() {
   }, [appSettings.accentColor, appSettings.assistColor]);
   const [autostartOn, setAutostartOn] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
+  const [sfxLibraryPath, setSfxLibraryPath] = useState<string | null>(null);
 
   const switchModule = useCallback(
     (m: AppModule) => {
@@ -837,6 +843,33 @@ export default function App() {
     }
   }, [openVault, t]);
 
+  const pickSfxLibrary = useCallback(async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: t("sfxPickLibrary"),
+      });
+      if (typeof selected !== "string" || !selected) return;
+      const store = await load(SFX_STORE_FILE, { autoSave: true });
+      const cur = (await store.get<Record<string, unknown>>("sfx")) ?? {};
+      await store.set("sfx", { ...cur, libraryPath: selected });
+      setSfxLibraryPath(selected);
+      window.dispatchEvent(new CustomEvent(SFX_LIBRARY_EVENT, { detail: selected }));
+    } catch {
+      /* ignore */
+    }
+  }, [t]);
+
+  useEffect(() => {
+    const onLib = (e: Event) => {
+      const dir = (e as CustomEvent<string | null>).detail;
+      setSfxLibraryPath(typeof dir === "string" ? dir : null);
+    };
+    window.addEventListener(SFX_LIBRARY_EVENT, onLib);
+    return () => window.removeEventListener(SFX_LIBRARY_EVENT, onLib);
+  }, []);
+
   useEffect(() => {
     if (bootRef.current) return;
     bootRef.current = true;
@@ -892,6 +925,14 @@ export default function App() {
           const saved = await store.get<string>(VAULT_KEY);
           if (saved) await openVault(saved);
         }
+
+        try {
+          const sfxStore = await load(SFX_STORE_FILE, { autoSave: true });
+          const sfx = await sfxStore.get<{ libraryPath?: string | null }>("sfx");
+          if (sfx?.libraryPath) setSfxLibraryPath(sfx.libraryPath);
+        } catch {
+          /* ignore */
+        }
       } catch {
         /* ignore */
       } finally {
@@ -911,7 +952,7 @@ export default function App() {
     resetView();
   }, [resetView]);
 
-  // 窗口缩放：停悬停预览 + 关过渡，避免拖边框时解码/动画抢主线程（masonic/桌面端常见做法）
+  // 窗口缩放：打 is-resizing，停预览/过渡/图表重算，松手后再恢复
   useEffect(() => {
     let endTimer: number | null = null;
     const onResize = () => {
@@ -921,9 +962,9 @@ export default function App() {
       endTimer = window.setTimeout(() => {
         endTimer = null;
         document.documentElement.classList.remove("is-resizing");
-      }, 140);
+      }, 180);
     };
-    window.addEventListener("resize", onResize);
+    window.addEventListener("resize", onResize, { passive: true });
     return () => {
       window.removeEventListener("resize", onResize);
       if (endTimer != null) window.clearTimeout(endTimer);
@@ -1164,6 +1205,11 @@ export default function App() {
         label: t("sfxboard"),
         onClick: () => switchModule("sfx"),
       });
+      items.push({
+        id: "live",
+        label: t("liveData"),
+        onClick: () => switchModule("live"),
+      });
       openCtxMenu(e, items, setCtxMenu);
     },
     [vault, loading, pickVault, loadImages, t, switchModule],
@@ -1296,6 +1342,14 @@ export default function App() {
       >
         <AudioLines size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
+      <button
+        type="button"
+        className={appModule === "live" ? "icon-btn on" : "icon-btn"}
+        title={t("liveData")}
+        onClick={() => switchModule("live")}
+      >
+        <ChartColumn size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+      </button>
     </nav>
   );
 
@@ -1359,14 +1413,6 @@ export default function App() {
                 </button>
               </label>
             )}
-            <button
-              type="button"
-              className="icon-btn"
-              title={vault ? t("changeFolder") : t("pickFolder")}
-              onClick={pickVault}
-            >
-              <FolderOpen size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-            </button>
             {vault && (
               <button
                 type="button"
@@ -1400,7 +1446,10 @@ export default function App() {
             )}
           </>
         ))}
-      {(appModule === "passbox" || appModule === "notepad" || appModule === "sfx") &&
+      {(appModule === "passbox" ||
+        appModule === "notepad" ||
+        appModule === "sfx" ||
+        appModule === "live") &&
         moduleChrome?.tools}
       <ThemeButton />
       <LangButton />
@@ -1465,7 +1514,10 @@ export default function App() {
                     </span>
                   </div>
                 ))}
-              {(appModule === "passbox" || appModule === "notepad" || appModule === "sfx") &&
+              {(appModule === "passbox" ||
+                appModule === "notepad" ||
+                appModule === "sfx" ||
+                appModule === "live") &&
                 (moduleChrome?.context || moduleChrome?.title || moduleChrome?.meta) && (
                   <div
                     className={
@@ -1526,6 +1578,12 @@ export default function App() {
         </div>
       )}
 
+      {appModule === "live" && (
+        <div className="module-body">
+          <LiveModule embedded onChromeChange={setModuleChrome} />
+        </div>
+      )}
+
       {appModule === "gallery" && error && <div className="banner error">{error}</div>}
 
       {appModule === "gallery" && !vault && (
@@ -1555,6 +1613,11 @@ export default function App() {
                   id: "sfx",
                   label: t("sfxboard"),
                   onClick: () => switchModule("sfx"),
+                },
+                {
+                  id: "live",
+                  label: t("liveData"),
+                  onClick: () => switchModule("live"),
                 },
               ],
               setCtxMenu,
@@ -1786,6 +1849,10 @@ export default function App() {
         autostart={autostartOn}
         onAutostartChange={onAutostartChange}
         autostartBusy={autostartBusy}
+        vaultPath={vault}
+        onPickVault={() => void pickVault()}
+        sfxLibraryPath={sfxLibraryPath}
+        onPickSfxLibrary={() => void pickSfxLibrary()}
       />
       <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
     </div>
