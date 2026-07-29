@@ -29,12 +29,14 @@ import {
   ArrowLeft,
   AudioLines,
   ChartColumn,
+  Video,
   X,
 } from "lucide-react";
 import Passbox from "./Passbox";
 import Notepad from "./Notepad";
 import Soundboard from "./Soundboard";
 import LiveModule from "./LiveModule";
+import VcamModule from "./vcam/VcamModule";
 import ContextMenu, { openCtxMenu, type CtxItem, type CtxMenuState } from "./ContextMenu";
 import { LangButton, useI18n } from "./i18n";
 import { ThemeButton, useTheme } from "./theme";
@@ -706,8 +708,8 @@ export default function App() {
   const bindContent = useCallback((node: HTMLElement | null) => {
     setScrollRoot(node);
   }, []);
-  /** 模块：图库 / 密码箱 / 记事本 / 音效 / 分析 */
-  type AppModule = "gallery" | "passbox" | "notepad" | "sfx" | "live";
+  /** 模块：图库 / 密码箱 / 记事本 / 音效 / 分析 / 虚拟摄像头 */
+  type AppModule = "gallery" | "passbox" | "notepad" | "sfx" | "live" | "vcam";
   const [appModule, setAppModule] = useState<AppModule>("gallery");
   const [moduleChrome, setModuleChrome] = useState<ModuleChrome | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState>(null);
@@ -1257,6 +1259,11 @@ export default function App() {
         label: t("liveData"),
         onClick: () => switchModule("live"),
       });
+      items.push({
+        id: "vcam",
+        label: t("vcamTitle"),
+        onClick: () => switchModule("vcam"),
+      });
       openCtxMenu(e, items, setCtxMenu);
     },
     [vault, loading, pickVault, loadImages, t, switchModule, toolPassboxOn],
@@ -1401,6 +1408,14 @@ export default function App() {
       >
         <ChartColumn size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
+      <button
+        type="button"
+        className={appModule === "vcam" ? "icon-btn on" : "icon-btn"}
+        title={t("vcamTitle")}
+        onClick={() => switchModule("vcam")}
+      >
+        <Video size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+      </button>
     </nav>
   );
 
@@ -1500,7 +1515,8 @@ export default function App() {
       {(appModule === "passbox" ||
         appModule === "notepad" ||
         appModule === "sfx" ||
-        appModule === "live") &&
+        appModule === "live" ||
+        appModule === "vcam") &&
         moduleChrome?.tools}
       <ThemeButton />
       <LangButton />
@@ -1568,7 +1584,8 @@ export default function App() {
               {(appModule === "passbox" ||
                 appModule === "notepad" ||
                 appModule === "sfx" ||
-                appModule === "live") &&
+                appModule === "live" ||
+                appModule === "vcam") &&
                 (moduleChrome?.context || moduleChrome?.title || moduleChrome?.meta) && (
                   <div
                     className={
@@ -1634,6 +1651,12 @@ export default function App() {
       {appModule === "live" && (
         <div className="module-body">
           <LiveModule embedded onChromeChange={setModuleChrome} />
+        </div>
+      )}
+
+      {appModule === "vcam" && (
+        <div className="module-body">
+          <VcamModule embedded onChromeChange={setModuleChrome} />
         </div>
       )}
 

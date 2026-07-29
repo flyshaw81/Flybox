@@ -8,9 +8,12 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+/dist
 dist-ssr
 *.local
+
+# Virtual cam intermediate CMake build (keep src-vcam/dist DLL)
+src-vcam/build/
 
 # Editor directories and files
 .vscode/*
@@ -34,4 +37,8 @@ scripts/check-live-*.mjs
 
 # FFmpeg 体积过大，本机放在 vendor/ffmpeg，不进仓库
 src-tauri/vendor/ffmpeg/
+
+
+# Virtual cam intermediate build
+src-vcam/build/
 

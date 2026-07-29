@@ -1,0 +1,7 @@
+LIBRARY flybox-virtualcam-module64
+EXPORTS
+	DllCanUnloadNow     PRIVATE
+	DllGetClassObject   PRIVATE
+	DllRegisterServer   PRIVATE
+	DllUnregisterServer PRIVATE
+	DllInstall          PRIVATE

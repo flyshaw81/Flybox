@@ -5,6 +5,7 @@ mod midi_mtc;
 mod obs_ctrl;
 mod sfx;
 mod vault;
+mod vcam;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use include_dir::{include_dir, Dir};
@@ -21,6 +22,7 @@ use midi_mtc::MidiState;
 use obs_ctrl::ObsState;
 use sfx::SfxState;
 use vault::VaultState;
+use vcam::VcamState;
 
 /// Frontend assets baked into the binary at compile time (from ../dist).
 /// Served from 127.0.0.1 so Clash/TUN never sees tauri.localhost.
@@ -618,6 +620,7 @@ pub fn run() {
         .manage(SfxState::default())
         .manage(ObsState::default())
         .manage(MidiState::default())
+        .manage(VcamState::default())
         .setup(move |app| {
             let page_origin = ui_origin.clone();
             let media_origin = file_origin.clone();
@@ -821,6 +824,11 @@ pub fn run() {
             obs_ctrl::obs_set_scene,
             obs_ctrl::obs_sync_media_seek,
             obs_ctrl::obs_disconnect,
+            vcam::vcam_status,
+            vcam::vcam_install,
+            vcam::vcam_uninstall,
+            vcam::vcam_start,
+            vcam::vcam_stop,
             midi_mtc::midi_list_ports,
             midi_mtc::midi_status,
             midi_mtc::midi_configure,
