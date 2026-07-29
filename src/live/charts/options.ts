@@ -23,9 +23,20 @@ function baseText(theme: ChartTheme) {
   };
 }
 
+export type MinuteChartLabels = {
+  online: string;
+  gifts: string;
+  fans: string;
+};
+
 export function minuteOption(
   points: MinutePoint[],
   moments: MinuteMoment[] = [],
+  labels: MinuteChartLabels = {
+    online: "在线",
+    gifts: "音浪",
+    fans: "涨粉",
+  },
 ): EChartsOption {
   const theme = readChartTheme();
   const accent = theme.accent || ACCENT;
@@ -38,17 +49,18 @@ export function minuteOption(
 
   // 只标高光，且挂在对应系列上；低谷用底部文案即可
   const highs = moments.filter((m) => m.kind === "high").slice(0, 3);
-  const markFor = (match: (label: string) => boolean) =>
+  const markFor = (match: (id: string) => boolean) =>
     highs
-      .filter((m) => match(m.label))
+      .filter((m) => match(m.id))
       .map((m) => {
         const idx = points.findIndex((p) => shortClock(p.t) === m.clock);
         const i = idx >= 0 ? idx : 0;
-        const y = m.label.includes("音浪")
-          ? points[i]!.gifts
-          : m.label.includes("涨粉")
-            ? points[i]!.followers
-            : points[i]!.viewers;
+        const y =
+          m.id === "giftPeak"
+            ? points[i]!.gifts
+            : m.id === "fanPeak"
+              ? points[i]!.followers
+              : points[i]!.viewers;
         return {
           name: m.label,
           coord: [cats[i], y] as [string, number],
@@ -68,7 +80,7 @@ export function minuteOption(
       textStyle: { color: theme.text || "#f2f2f2" },
     },
     legend: {
-      data: ["在线", "音浪", "涨粉"],
+      data: [labels.online, labels.gifts, labels.fans],
       top: 0,
       textStyle: { color: theme.muted, fontSize: 11 },
       itemWidth: 12,
@@ -102,14 +114,14 @@ export function minuteOption(
     yAxis: [
       {
         type: "value",
-        name: "在线",
+        name: labels.online,
         nameTextStyle: { color: theme.muted, fontSize: 10 },
         splitLine: { lineStyle: { color: theme.border, opacity: 0.45 } },
         axisLabel: { color: theme.muted, fontSize: 10 },
       },
       {
         type: "value",
-        name: "音浪",
+        name: labels.gifts,
         nameTextStyle: { color: theme.muted, fontSize: 10 },
         splitLine: { show: false },
         axisLabel: { color: theme.muted, fontSize: 10 },
@@ -117,7 +129,7 @@ export function minuteOption(
     ],
     series: [
       {
-        name: "在线",
+        name: labels.online,
         type: "line",
         smooth: 0.25,
         showSymbol: false,
@@ -128,11 +140,11 @@ export function minuteOption(
         markPoint: {
           symbolSize: 28,
           label: { fontSize: 9, color: "#fff" },
-          data: markFor((l) => l.includes("在线")),
+          data: markFor((id) => id === "viewerPeak"),
         },
       },
       {
-        name: "音浪",
+        name: labels.gifts,
         type: "line",
         yAxisIndex: 1,
         smooth: 0.25,
@@ -143,11 +155,11 @@ export function minuteOption(
         markPoint: {
           symbolSize: 28,
           label: { fontSize: 9, color: "#fff" },
-          data: markFor((l) => l.includes("音浪")),
+          data: markFor((id) => id === "giftPeak"),
         },
       },
       {
-        name: "涨粉",
+        name: labels.fans,
         type: "line",
         yAxisIndex: 1,
         smooth: 0.25,
@@ -158,14 +170,24 @@ export function minuteOption(
         markPoint: {
           symbolSize: 26,
           label: { fontSize: 9, color: "#fff" },
-          data: markFor((l) => l.includes("涨粉")),
+          data: markFor((id) => id === "fanPeak"),
         },
       },
     ],
   };
 }
 
-export function channelOption(channels: TrafficChannel[]): EChartsOption {
+export type ChannelChartLabels = {
+  min: (n: string) => string;
+  audience: (pct: string) => string;
+  avg: (avg: string) => string;
+  rev: (pct: string) => string;
+};
+
+export function channelOption(
+  channels: TrafficChannel[],
+  chartLabels?: ChannelChartLabels,
+): EChartsOption {
   const theme = readChartTheme();
   const accent = theme.accent || ACCENT;
   const list = channels
@@ -191,12 +213,20 @@ export function channelOption(channels: TrafficChannel[]): EChartsOption {
             : "";
         const row = list.find((c) => c.name === name);
         if (!row) return name;
-        const avg =
+        const avgRaw =
           row.avgWatchSec != null
-            ? `${(row.avgWatchSec / 60).toFixed(1)}分`
-            : "—";
+            ? (row.avgWatchSec / 60).toFixed(1)
+            : null;
+        const avg = avgRaw
+          ? chartLabels
+            ? chartLabels.min(avgRaw)
+            : `${avgRaw}分`
+          : "—";
         const consume =
           row.consumePct != null ? `${row.consumePct.toFixed(1)}%` : "—";
+        if (chartLabels) {
+          return `${row.name}<br/>${chartLabels.audience(row.watchPct?.toFixed(1) ?? "—")}<br/>${chartLabels.avg(avg)}<br/>${chartLabels.rev(consume)}`;
+        }
         return `${row.name}<br/>观众 ${row.watchPct?.toFixed(1) ?? "—"}%<br/>人均 ${avg}<br/>营收 ${consume}`;
       },
     },
@@ -286,9 +316,13 @@ export function ageOption(ages: AudienceBucket[]): EChartsOption {
 }
 
 /** 首页核心数据：周期按日音浪走势 */
-export function dailyGiftsOption(days: PeriodDailyGift[]): EChartsOption {
+export function dailyGiftsOption(
+  days: PeriodDailyGift[],
+  labels?: { seriesName: string; tip: (n: string) => string },
+): EChartsOption {
   const theme = readChartTheme();
   const accent = theme.accent || ACCENT;
+  const seriesName = labels?.seriesName ?? "收获音浪";
   const cats = days.map((d) => {
     const m = d.date.match(/^\d{4}-(\d{2})-(\d{2})$/);
     return m ? `${Number(m[1])}/${Number(m[2])}` : d.date;
@@ -308,7 +342,8 @@ export function dailyGiftsOption(days: PeriodDailyGift[]): EChartsOption {
         if (!p || typeof p !== "object") return "";
         const name = String((p as { name?: string }).name ?? "");
         const val = Number((p as { value?: number }).value ?? 0);
-        return `${name}<br/>收获音浪 ${val.toLocaleString("zh-CN")}`;
+        const n = val.toLocaleString();
+        return `${name}<br/>${labels ? labels.tip(n) : `收获音浪 ${n}`}`;
       },
     },
     grid: { left: 48, right: 16, top: 20, bottom: 28 },
@@ -327,7 +362,7 @@ export function dailyGiftsOption(days: PeriodDailyGift[]): EChartsOption {
     },
     series: [
       {
-        name: "收获音浪",
+        name: seriesName,
         type: "line",
         smooth: 0.25,
         showSymbol: days.length <= 14,

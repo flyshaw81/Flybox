@@ -1,5 +1,5 @@
 import type { LiveGoals, LiveSession } from "./liveTypes";
-import { goalProgress } from "./insights";
+import { goalProgress, tf, type TFn } from "./insights";
 
 export type LiveAlert = {
   id: string;
@@ -15,16 +15,20 @@ export function evaluateLiveAlerts(
   session: LiveSession | null,
   goals: LiveGoals | undefined,
   allSessions: LiveSession[],
+  tr: TFn,
+  locale = "zh",
   nowMs = Date.now(),
 ): LiveAlert[] {
   if (!session || session.endTime != null) return [];
   const pts = session.dataPoints;
   if (pts.length < 2) return [];
 
+  const t: TFn = typeof tr === "function" ? tr : (k) => k;
   const out: LiveAlert[] = [];
   const last = pts[pts.length - 1]!;
   const nowSec = Math.floor(nowMs / 1000);
   const elapsed = Math.max(0, nowSec - session.startTime);
+  const loc = locale === "en" ? "en-US" : "zh-CN";
 
   // 在线 3 分钟内掉超 30%（需至少 3 分钟数据）
   if (last.t >= 180) {
@@ -39,7 +43,11 @@ export function evaluateLiveAlerts(
       out.push({
         id: "viewers-drop",
         level: "warn",
-        text: `近3分钟在线掉约 ${drop}%（${older.viewers}→${last.viewers}），可加互动或垫场`,
+        text: tf(t, "liveAlertViewersDrop", {
+          drop,
+          from: older.viewers,
+          to: last.viewers,
+        }),
       });
     }
   }
@@ -72,7 +80,7 @@ export function evaluateLiveAlerts(
         out.push({
           id: "enter-collapse",
           level: "warn",
-          text: "近1分钟进房变差，封面/推荐承接可能弱了",
+          text: t("liveAlertEnter"),
         });
       }
     }
@@ -94,7 +102,10 @@ export function evaluateLiveAlerts(
         out.push({
           id: "goal-lag",
           level: "info",
-          text: `今日音浪 ${day.current.toLocaleString("zh-CN")}/${day.target.toLocaleString("zh-CN")}，进度偏慢`,
+          text: tf(t, "liveAlertGoal", {
+            cur: day.current.toLocaleString(loc),
+            tgt: day.target.toLocaleString(loc),
+          }),
         });
       }
     }

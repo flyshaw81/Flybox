@@ -1,4 +1,8 @@
 import type { LiveSession, MinutePoint } from "./liveTypes";
+import {
+  localizeChannelName,
+  localizePortraitText,
+} from "./localizeDisplay";
 
 export type SessionGrade = "hot" | "normal" | "cold";
 
@@ -37,8 +41,16 @@ export type SlotAdvice = {
   shortVsNormalText: string | null;
 };
 
+export type MomentId =
+  | "giftPeak"
+  | "viewerPeak"
+  | "fanPeak"
+  | "leavePeak"
+  | "viewerTrough";
+
 export type MinuteMoment = {
   kind: "high" | "low";
+  id: MomentId;
   label: string;
   clock: string;
   value: number;
@@ -57,7 +69,37 @@ export type SessionInsight = {
   };
 };
 
-const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+/** i18n lookup — same shape as useI18n().t */
+export type TFn = (key: string) => string;
+
+function asT(tr: unknown): TFn {
+  return typeof tr === "function" ? (tr as TFn) : (key: string) => key;
+}
+
+export function tf(
+  tr: unknown,
+  key: string,
+  vars?: Record<string, string | number>,
+): string {
+  let s = asT(tr)(key);
+  if (!vars) return s;
+  for (const [k, v] of Object.entries(vars)) {
+    s = s.split(`{${k}}`).join(String(v));
+  }
+  return s;
+}
+
+function loc(locale: string): string {
+  return locale === "en" ? "en-US" : "zh-CN";
+}
+
+function num(n: number, locale: string): string {
+  return n.toLocaleString(loc(locale));
+}
+
+function weekdayName(tr: TFn, jsDay: number): string {
+  return tr(`liveWd${jsDay}` as "liveWd0");
+}
 
 function sortedByStart(sessions: LiveSession[]): LiveSession[] {
   return sessions.slice().sort((a, b) => b.startTime - a.startTime);
@@ -86,12 +128,12 @@ function fmtPct(p: number | null): string {
   return `${sign}${p.toFixed(0)}%`;
 }
 
-function fmtDur(sec: number): string {
+function fmtDur(sec: number, tr: TFn): string {
   const s = Math.max(0, Math.floor(sec));
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
-  if (h > 0) return `${h}小时${m}分`;
-  return `${m}分钟`;
+  if (h > 0) return tf(tr, "liveUnitHourMin", { h, m });
+  return tf(tr, "liveUnitMinOnly", { m });
 }
 
 function inWindow(sessions: LiveSession[], nowSec: number, fromAgo: number, toAgo: number) {
@@ -128,13 +170,20 @@ export function gradeSession(
   return "normal";
 }
 
-export function gradeLabel(g: SessionGrade): string {
-  if (g === "hot") return "爆发";
-  if (g === "cold") return "偏冷";
-  return "正常";
+export function gradeLabel(g: SessionGrade, tr: TFn): string {
+  const t = asT(tr);
+  if (g === "hot") return t("liveGradeHot");
+  if (g === "cold") return t("liveGradeCold");
+  return t("liveGradeNormal");
 }
 
-export function buildOverviewInsights(sessions: LiveSession[], now = Date.now()): InsightLine[] {
+export function buildOverviewInsights(
+  sessions: LiveSession[],
+  tr: TFn,
+  locale = "zh",
+  now = Date.now(),
+): InsightLine[] {
+  const t = asT(tr);
   const list = sortedByStart(sessions);
   if (!list.length) return [];
   const nowSec = Math.floor(now / 1000);
@@ -158,12 +207,23 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
     );
     lines.push({
       kind: "trend",
-      text: `近7天相对前7天：音浪 ${fmtPct(gPct)}，涨粉 ${fmtPct(fPct)}，场均时长 ${fmtPct(durPct)}`,
+      text: tf(t, "liveInsTrendCompare", {
+        gifts: fmtPct(gPct),
+        fans: fmtPct(fPct),
+        dur: fmtPct(durPct),
+      }),
     });
   } else if (last7.length) {
     lines.push({
       kind: "trend",
-      text: `近7天共 ${last7.length} 场，音浪 ${last7.reduce((s, x) => s + x.totalGifts, 0).toLocaleString("zh-CN")}，涨粉 ${last7.reduce((s, x) => s + x.newFollowers, 0)}`,
+      text: tf(t, "liveInsTrendOnly", {
+        n: last7.length,
+        gifts: num(
+          last7.reduce((s, x) => s + x.totalGifts, 0),
+          locale,
+        ),
+        fans: last7.reduce((s, x) => s + x.newFollowers, 0),
+      }),
     });
   }
 
@@ -174,13 +234,20 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
     const d = new Date(bestG.startTime * 1000);
     lines.push({
       kind: "best",
-      text: `近7天音浪最佳：${d.getMonth() + 1}/${d.getDate()}「${bestG.title.slice(0, 16)}」${bestG.totalGifts.toLocaleString("zh-CN")} 音浪`,
+      text: tf(t, "liveInsBestGifts", {
+        date: `${d.getMonth() + 1}/${d.getDate()}`,
+        title: bestG.title.slice(0, 16),
+        gifts: num(bestG.totalGifts, locale),
+      }),
     });
     if (bestF.id !== bestG.id && bestF.newFollowers > 0) {
       const df = new Date(bestF.startTime * 1000);
       lines.push({
         kind: "best",
-        text: `近7天涨粉最佳：${df.getMonth() + 1}/${df.getDate()} +${bestF.newFollowers} 粉`,
+        text: tf(t, "liveInsBestFans", {
+          date: `${df.getMonth() + 1}/${df.getDate()}`,
+          fans: bestF.newFollowers,
+        }),
       });
     }
   }
@@ -196,7 +263,7 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
     if (streak >= 3) {
       lines.push({
         kind: "risk",
-        text: `最近连续 ${streak} 场音浪低于近况中位，状态偏冷，可优先挑黄金时段开`,
+        text: tf(t, "liveInsColdStreak", { n: streak }),
       });
     }
   }
@@ -205,17 +272,27 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
   if (portrait) {
     const bits: string[] = [];
     if (portrait.malePct != null && portrait.malePct >= 70) {
-      bits.push(`男性约 ${portrait.malePct}%`);
+      bits.push(tf(t, "liveInsMale", { pct: portrait.malePct }));
     }
     if (portrait.nonFanPct != null && portrait.nonFanPct >= 80) {
-      bits.push(`路人约 ${portrait.nonFanPct}%（涨粉空间大）`);
+      bits.push(tf(t, "liveInsNonFan", { pct: portrait.nonFanPct }));
     }
-    if (portrait.hobbyText) bits.push(portrait.hobbyText.replace(/居多$/, ""));
-    if (portrait.regionText) bits.push(portrait.regionText.replace(/居多$/, ""));
+    if (portrait.hobbyText) {
+      const h =
+        localizePortraitText(portrait.hobbyText.replace(/居多$/, ""), locale) ||
+        portrait.hobbyText.replace(/居多$/, "");
+      bits.push(h);
+    }
+    if (portrait.regionText) {
+      const r =
+        localizePortraitText(portrait.regionText.replace(/居多$/, ""), locale) ||
+        portrait.regionText.replace(/居多$/, "");
+      bits.push(r);
+    }
     if (bits.length) {
       lines.push({
         kind: "tip",
-        text: `最近观众：${bits.slice(0, 3).join(" · ")}`,
+        text: tf(t, "liveInsAudience", { bits: bits.slice(0, 3).join(" · ") }),
       });
     }
   }
@@ -226,7 +303,10 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
     if (top.watchPct != null && top.watchPct >= 85 && /推荐/.test(top.name)) {
       lines.push({
         kind: "tip",
-        text: `最近一场约 ${top.watchPct.toFixed(0)}% 来自${top.name}，关注页占比低，开播前半小时多引导关注/进房承接`,
+        text: tf(t, "liveInsTrafficRec", {
+          pct: top.watchPct.toFixed(0),
+          name: localizeChannelName(top.name, locale),
+        }),
       });
     }
   }
@@ -236,12 +316,16 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
   if (fun?.enterRateDiff != null && fun.enterRateDiff <= -2) {
     lines.push({
       kind: "risk",
-      text: `最近进房率较近7场低 ${Math.abs(fun.enterRateDiff).toFixed(1)} 个点，优先改封面与开场 30 秒`,
+      text: tf(t, "liveInsEnterLow", {
+        pts: Math.abs(fun.enterRateDiff).toFixed(1),
+      }),
     });
   } else if (fun?.payRateDiff != null && fun.payRateDiff <= -1.5) {
     lines.push({
       kind: "risk",
-      text: `最近付费转化较近7场低 ${Math.abs(fun.payRateDiff).toFixed(1)} 个点，检查福利节奏与付费引导`,
+      text: tf(t, "liveInsPayLow", {
+        pts: Math.abs(fun.payRateDiff).toFixed(1),
+      }),
     });
   } else if (
     fun?.showUcnt &&
@@ -251,7 +335,9 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
   ) {
     lines.push({
       kind: "risk",
-      text: `最近进房率约 ${((fun.enterUcnt / fun.showUcnt) * 100).toFixed(1)}%，曝光没接住，优先改封面/开场`,
+      text: tf(t, "liveInsEnterRate", {
+        pct: ((fun.enterUcnt / fun.showUcnt) * 100).toFixed(1),
+      }),
     });
   }
 
@@ -264,7 +350,10 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
       const clock = peak.t.match(/(\d{1,2}:\d{2})(?::\d{2})?$/)?.[1] || peak.t;
       lines.push({
         kind: "tip",
-        text: `最近高光在 ${clock}（音浪峰值 ${peak.gifts.toLocaleString("zh-CN")}），可复盘该时段话术/互动`,
+        text: tf(t, "liveInsHighlight", {
+          clock,
+          gifts: num(peak.gifts, locale),
+        }),
       });
     }
   }
@@ -279,13 +368,19 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
     if ((m.lostCount ?? 0) > 0) {
       lines.push({
         kind: "risk",
-        text: `最近一场流失相关 ${m.lostCount} 人${m.note ? `（${m.note}）` : ""}，优先私信/粉丝群召回贡献下降用户`,
+        text: tf(t, "liveInsLost", {
+          n: m.lostCount ?? 0,
+          note: m.note ? tf(t, "liveInsParen", { text: m.note }) : "",
+        }),
       });
     } else if ((m.highValueCount ?? 0) > 0) {
-      const samples = m.highValueSamples?.slice(0, 2).join("、");
+      const samples = m.highValueSamples?.slice(0, 2).join(locale === "en" ? ", " : "、");
       lines.push({
         kind: "tip",
-        text: `最近高活跃贡献榜 ${m.highValueCount} 人${samples ? `（如 ${samples}）` : ""}，开播前可点名互动稳场`,
+        text: tf(t, "liveInsHighVal", {
+          n: m.highValueCount ?? 0,
+          samples: samples ? tf(t, "liveInsLike", { text: samples }) : "",
+        }),
       });
     }
   }
@@ -298,7 +393,7 @@ export function buildOverviewInsights(sessions: LiveSession[], now = Date.now())
     if (d >= 12) {
       lines.push({
         kind: "tip",
-        text: `付费观众性别结构与全部差约 ${d.toFixed(0)} 个点，福利话术可按付费画像单独调`,
+        text: tf(t, "liveInsPaidGender", { pts: d.toFixed(0) }),
       });
     }
   }
@@ -391,7 +486,13 @@ function buildWeekdayHeatmap(
   return cells;
 }
 
-export function buildSlotAdvice(sessions: LiveSession[], now = Date.now()): SlotAdvice | null {
+export function buildSlotAdvice(
+  sessions: LiveSession[],
+  tr: TFn,
+  locale = "zh",
+  now = Date.now(),
+): SlotAdvice | null {
+  const t = asT(tr);
   const cells = buildWeekdayHeatmap(sessions, 30, now).filter((c) => c.count >= 2);
   if (!cells.length) return null;
   const best = cells.reduce((a, b) => (b.avgGifts > a.avgGifts ? b : a));
@@ -405,8 +506,8 @@ export function buildSlotAdvice(sessions: LiveSession[], now = Date.now()): Slot
       const ratio = sg / ng;
       shortVsNormalText =
         ratio < 0.7
-          ? `不足30分钟的场场均音浪只有正常场的 ${(ratio * 100).toFixed(0)}%，短开不太划算`
-          : `短开（<30分钟）与正常场场均音浪接近（${(ratio * 100).toFixed(0)}%）`;
+          ? tf(t, "liveInsShortBad", { pct: (ratio * 100).toFixed(0) })
+          : tf(t, "liveInsShortOk", { pct: (ratio * 100).toFixed(0) });
     }
   }
   const hourEnd = (best.hour + 1) % 24;
@@ -414,7 +515,13 @@ export function buildSlotAdvice(sessions: LiveSession[], now = Date.now()): Slot
     bestWeekday: best.weekday,
     bestHour: best.hour,
     avgGifts: best.avgGifts,
-    text: `近30天：${WEEKDAYS[best.weekday]} ${best.hour}:00–${hourEnd}:00 场均音浪最高（约 ${best.avgGifts.toLocaleString("zh-CN")}，样本 ${best.count} 场）`,
+    text: tf(t, "liveInsSlotBest", {
+      weekday: weekdayName(t, best.weekday),
+      h0: best.hour,
+      h1: hourEnd,
+      gifts: num(best.avgGifts, locale),
+      n: best.count,
+    }),
     shortVsNormalText,
   };
 }
@@ -422,37 +529,57 @@ export function buildSlotAdvice(sessions: LiveSession[], now = Date.now()): Slot
 export function buildSessionInsight(
   session: LiveSession,
   all: LiveSession[],
+  tr: TFn,
+  locale = "zh",
 ): SessionInsight {
+  const t = asT(tr);
   const baseline = recentMedianBaseline(all, session.id, 7);
   const grade = gradeSession(session, baseline);
   const giftsPct = baseline ? pctChange(session.totalGifts, baseline.gifts) : null;
   const followersPct = baseline ? pctChange(session.newFollowers, baseline.followers) : null;
   const durationPct = baseline ? pctChange(session.duration, baseline.duration) : null;
-  const moments = labelMinuteMoments(session.minuteTrend);
-  const diagnosis = diagnoseSession(session, all);
+  const moments = labelMinuteMoments(session.minuteTrend, t);
+  const diagnosis = diagnoseSession(session, all, t, locale);
   const lines: string[] = [];
   if (baseline) {
     lines.push(
-      `音浪相对近7场中位 ${fmtPct(giftsPct)}（本场 ${session.totalGifts.toLocaleString("zh-CN")} / 中位 ${Math.round(baseline.gifts).toLocaleString("zh-CN")}）`,
+      tf(t, "liveInsVsGifts", {
+        pct: fmtPct(giftsPct),
+        cur: num(session.totalGifts, locale),
+        med: num(Math.round(baseline.gifts), locale),
+      }),
     );
     lines.push(
-      `涨粉相对近7场中位 ${fmtPct(followersPct)}（本场 +${session.newFollowers} / 中位 ${Math.round(baseline.followers)}）`,
+      tf(t, "liveInsVsFans", {
+        pct: fmtPct(followersPct),
+        cur: session.newFollowers,
+        med: Math.round(baseline.followers),
+      }),
     );
     lines.push(
-      `时长相对近7场中位 ${fmtPct(durationPct)}（本场 ${fmtDur(session.duration)} / 中位 ${fmtDur(baseline.duration)}）`,
+      tf(t, "liveInsVsDur", {
+        pct: fmtPct(durationPct),
+        cur: fmtDur(session.duration, t),
+        med: fmtDur(baseline.duration, t),
+      }),
     );
   } else {
-    lines.push("近况场次不足，暂用绝对值展示；多开几场后会有对比结论");
+    lines.push(t("liveInsNoBase"));
   }
-  if (diagnosis) lines.push(`诊断：${diagnosis}`);
+  if (diagnosis) lines.push(tf(t, "liveInsDiagPrefix", { text: diagnosis }));
   for (const m of moments.slice(0, 3)) {
     lines.push(
-      `${m.kind === "high" ? "高光" : "低谷"} · ${m.label} ${m.clock}（${m.value.toLocaleString("zh-CN")}）`,
+      tf(t, "liveInsMomentLine", {
+        kind: m.kind === "high" ? t("liveInsHigh") : t("liveInsLow"),
+        label: m.label,
+        clock: m.clock,
+        value: num(m.value, locale),
+      }),
     );
   }
   return {
     grade,
-    gradeLabel: gradeLabel(grade),
+    gradeLabel: gradeLabel(grade, t),
     lines,
     diagnosis,
     moments,
@@ -549,7 +676,11 @@ function shortClock(t: string): string {
 }
 
 /** 分钟走势：高光 / 低谷自动标注 */
-export function labelMinuteMoments(points: MinutePoint[] | null | undefined): MinuteMoment[] {
+export function labelMinuteMoments(
+  points: MinutePoint[] | null | undefined,
+  tr: TFn,
+): MinuteMoment[] {
+  const translate = asT(tr);
   if (!points || points.length < 3) return [];
   const out: MinuteMoment[] = [];
   const by = <K extends keyof MinutePoint>(key: K) =>
@@ -560,7 +691,8 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
   if (giftPeak.gifts > 0) {
     out.push({
       kind: "high",
-      label: "音浪峰值",
+      id: "giftPeak",
+      label: translate("liveMomGiftPeak"),
       clock: shortClock(giftPeak.t),
       value: giftPeak.gifts,
     });
@@ -569,7 +701,8 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
   if (viewPeak.viewers > 0) {
     out.push({
       kind: "high",
-      label: "在线峰值",
+      id: "viewerPeak",
+      label: translate("liveMomViewerPeak"),
       clock: shortClock(viewPeak.t),
       value: viewPeak.viewers,
     });
@@ -578,7 +711,8 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
   if (fanPeak.followers > 0) {
     out.push({
       kind: "high",
-      label: "涨粉峰值",
+      id: "fanPeak",
+      label: translate("liveMomFanPeak"),
       clock: shortClock(fanPeak.t),
       value: fanPeak.followers,
     });
@@ -587,7 +721,8 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
   if ((leavePeak.leave ?? 0) > 0) {
     out.push({
       kind: "low",
-      label: "离开高峰",
+      id: "leavePeak",
+      label: translate("liveMomLeavePeak"),
       clock: shortClock(leavePeak.t),
       value: leavePeak.leave ?? 0,
     });
@@ -606,7 +741,8 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
     ) {
       out.push({
         kind: "low",
-        label: "在线低谷",
+        id: "viewerTrough",
+        label: translate("liveMomViewerTrough"),
         clock: shortClock(trough.t),
         value: trough.viewers,
       });
@@ -615,7 +751,7 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
   // 去重：同钟点同 kind 只留一条
   const seen = new Set<string>();
   return out.filter((m) => {
-    const k = `${m.kind}:${m.clock}:${m.label}`;
+    const k = `${m.kind}:${m.clock}:${m.id}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
@@ -626,37 +762,56 @@ export function labelMinuteMoments(points: MinutePoint[] | null | undefined): Mi
 export function diagnoseSession(
   session: LiveSession,
   all: LiveSession[],
+  tr: TFn,
+  locale = "zh",
 ): string | null {
+  const t = asT(tr);
   const fun = session.trafficFunnel;
   const ch = session.trafficChannels?.[0];
-  const moments = labelMinuteMoments(session.minuteTrend);
-  const giftHigh = moments.find((m) => m.label === "音浪峰值");
-  const leaveLow = moments.find((m) => m.label === "离开高峰");
-  const trough = moments.find((m) => m.label === "在线低谷");
+  const moments = labelMinuteMoments(session.minuteTrend, t);
+  const giftHigh = moments.find((m) => m.id === "giftPeak");
+  const leaveLow = moments.find((m) => m.id === "leavePeak");
+  const trough = moments.find((m) => m.id === "viewerTrough");
 
   if (fun?.enterRateDiff != null && fun.enterRateDiff <= -2) {
-    return `进房率较近7场低 ${Math.abs(fun.enterRateDiff).toFixed(1)} 个点，优先改封面与开场 30 秒`;
+    return tf(t, "liveDiagEnter", {
+      pts: Math.abs(fun.enterRateDiff).toFixed(1),
+    });
   }
   if (fun?.payRateDiff != null && fun.payRateDiff <= -1.5) {
-    return `付费转化较近7场低 ${Math.abs(fun.payRateDiff).toFixed(1)} 个点，检查福利节奏与付费引导`;
+    return tf(t, "liveDiagPay", {
+      pts: Math.abs(fun.payRateDiff).toFixed(1),
+    });
   }
   if (ch?.watchPct != null && ch.watchPct >= 85 && /推荐/.test(ch.name)) {
-    return `约 ${ch.watchPct.toFixed(0)}% 来自${ch.name}，关注承接偏弱，开播前半小时多推关注/进房`;
+    return tf(t, "liveDiagTraffic", {
+      pct: ch.watchPct.toFixed(0),
+      name: localizeChannelName(ch.name, locale),
+    });
   }
   if (leaveLow && giftHigh && leaveLow.clock !== giftHigh.clock) {
-    return `${leaveLow.clock} 离开偏多，对照 ${giftHigh.clock} 高光话术，避免同段冷场`;
+    return tf(t, "liveDiagLeave", {
+      leave: leaveLow.clock,
+      high: giftHigh.clock,
+    });
   }
   if (trough) {
-    return `${trough.clock} 在线掉到 ${trough.value}，复盘该段是否断档或节奏拖沓`;
+    return tf(t, "liveDiagTrough", {
+      clock: trough.clock,
+      n: trough.value,
+    });
   }
   if (giftHigh) {
-    return `高光在 ${giftHigh.clock}（音浪 ${giftHigh.value.toLocaleString("zh-CN")}），可固化该时段互动`;
+    return tf(t, "liveDiagGiftHigh", {
+      clock: giftHigh.clock,
+      gifts: num(giftHigh.value, locale),
+    });
   }
   const baseline = recentMedianBaseline(all, session.id, 7);
   if (baseline && baseline.gifts > 0) {
     const ratio = session.totalGifts / baseline.gifts;
-    if (ratio <= 0.75) return "本场音浪低于近7场中位，下次优先挑黄金时段并提前 10 分钟暖场";
-    if (ratio >= 1.25) return "本场音浪高于近7场中位，记下开场与福利节点方便复用";
+    if (ratio <= 0.75) return t("liveDiagCold");
+    if (ratio >= 1.25) return t("liveDiagHot");
   }
   return null;
 }
@@ -665,21 +820,42 @@ export function diagnoseSession(
 export function buildSessionReportText(
   session: LiveSession,
   all: LiveSession[],
+  tr: TFn,
+  locale = "zh",
 ): string {
-  const insight = buildSessionInsight(session, all);
+  const t = asT(tr);
+  const insight = buildSessionInsight(session, all, t, locale);
   const d = new Date(session.startTime * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   const lines: string[] = [
-    `【FLYBOX 复盘】${when} · ${session.title || "未命名"}`,
-    `评级：${insight.gradeLabel} · 时长 ${fmtDur(session.duration)}`,
-    `音浪 ${session.totalGifts.toLocaleString("zh-CN")} · 涨粉 +${session.newFollowers} · 峰值在线 ${session.peakViewers || session.watchUcnt || 0}`,
+    tf(t, "liveReportTitle", {
+      when,
+      title: session.title || t("liveReportUntitled"),
+    }),
+    tf(t, "liveReportGrade", {
+      grade: insight.gradeLabel,
+      dur: fmtDur(session.duration, t),
+    }),
+    tf(t, "liveReportCore", {
+      gifts: num(session.totalGifts, locale),
+      fans: session.newFollowers,
+      peak: session.peakViewers || session.watchUcnt || 0,
+    }),
   ];
   for (const l of insight.lines) lines.push(`· ${l}`);
   const ch = session.trafficChannels?.[0];
   if (ch?.watchPct != null) {
-    lines.push(`流量：${ch.name} ${ch.watchPct.toFixed(1)}%` +
-      (ch.consumePct != null ? `（营收 ${ch.consumePct.toFixed(1)}%）` : ""));
+    lines.push(
+      tf(t, "liveReportTraffic", {
+        name: localizeChannelName(ch.name, locale),
+        pct: ch.watchPct.toFixed(1),
+        consume:
+          ch.consumePct != null
+            ? tf(t, "liveReportConsume", { pct: ch.consumePct.toFixed(1) })
+            : "",
+      }),
+    );
   }
   const fun = session.trafficFunnel;
   if (fun) {
@@ -696,7 +872,13 @@ export function buildSessionReportText(
           ? Math.round((fun.payUcnt / fun.enterUcnt) * 1000) / 10
           : null;
     lines.push(
-      `漏斗：曝光 ${fun.showUcnt ?? "—"} → 进房 ${fun.enterUcnt ?? "—"}${er != null ? `（${er}%）` : ""} → 付费 ${fun.payUcnt ?? "—"}${pr != null ? `（${pr}%）` : ""}`,
+      tf(t, "liveReportFunnel", {
+        show: fun.showUcnt ?? "—",
+        enter: fun.enterUcnt ?? "—",
+        er: er != null ? `（${er}%）` : "",
+        pay: fun.payUcnt ?? "—",
+        pr: pr != null ? `（${pr}%）` : "",
+      }),
     );
   }
   const p = session.audiencePortrait;
@@ -704,27 +886,38 @@ export function buildSessionReportText(
     const bits = [p.genderText, p.ageText, p.regionText, p.hobbyText]
       .filter(Boolean)
       .slice(0, 3);
-    if (bits.length) lines.push(`画像：${bits.join(" · ")}`);
+    if (bits.length) lines.push(tf(t, "liveReportPortrait", { bits: bits.join(" · ") }));
   }
   const paid = session.portraitSlices?.paid;
   if (paid?.genderText || paid?.ageText) {
     lines.push(
-      `付费画像：${[paid.genderText, paid.ageText, paid.hobbyText].filter(Boolean).slice(0, 2).join(" · ")}`,
+      tf(t, "liveReportPaid", {
+        bits: [paid.genderText, paid.ageText, paid.hobbyText]
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(" · "),
+      }),
     );
   }
   const m = session.audienceMaintenance;
   if (m) {
     lines.push(
-      `观众维护：流失 ${m.lostCount ?? "—"} · 高活跃 ${m.highValueCount ?? "—"}${m.note ? ` · ${m.note}` : ""}`,
+      tf(t, "liveReportMaint", {
+        lost: m.lostCount ?? "—",
+        high: m.highValueCount ?? "—",
+        note: m.note ? ` · ${m.note}` : "",
+      }),
     );
   }
-  const moments = labelMinuteMoments(session.minuteTrend);
+  const moments = labelMinuteMoments(session.minuteTrend, t);
   if (moments.length) {
     lines.push(
-      `节点：${moments.map((x) => `${x.label}${x.clock}(${x.value})`).join(" · ")}`,
+      tf(t, "liveReportMoments", {
+        bits: moments.map((x) => `${x.label}${x.clock}(${x.value})`).join(" · "),
+      }),
     );
   }
-  if (insight.diagnosis) lines.push(`诊断：${insight.diagnosis}`);
+  if (insight.diagnosis) lines.push(tf(t, "liveReportDiag", { text: insight.diagnosis }));
   return lines.join("\n");
 }
 
@@ -768,5 +961,3 @@ export function suggestedGoals(
     weeklyDurationSec,
   };
 }
-
-export { WEEKDAYS };

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
+import { useI18n } from "../i18n";
 import { useTheme } from "../theme";
 import type { LiveGoals, LiveProfile, LiveSession } from "./liveTypes";
 import {
@@ -18,12 +19,13 @@ import {
   gradeLabel,
   gradeSession,
   recentMedianBaseline,
+  tf,
   type RangeKey,
   type SortKey,
 } from "./insights";
 
-function fmt(n: number): string {
-  return n.toLocaleString("zh-CN");
+function fmt(n: number, locale: string): string {
+  return n.toLocaleString(locale === "en" ? "en-US" : "zh-CN");
 }
 
 function fmtDur(sec: number): string {
@@ -34,11 +36,11 @@ function fmtDur(sec: number): string {
   return `${m}m`;
 }
 
-function fmtDurMins(sec: number): string {
+function fmtDurMins(sec: number, t: (k: string) => string): string {
   const mins = Math.max(0, sec) / 60;
-  if (mins >= 1000) return `${mins.toFixed(2)}分钟`;
-  if (mins >= 10) return `${mins.toFixed(1)}分钟`;
-  return `${mins.toFixed(2)}分钟`;
+  const n =
+    mins >= 1000 ? mins.toFixed(2) : mins >= 10 ? mins.toFixed(1) : mins.toFixed(2);
+  return tf(t, "liveUnitMinF", { n });
 }
 
 function fmtPeriodDate(unix: number): string {
@@ -90,14 +92,18 @@ type Props = {
     digg: string;
     following: string;
     fans: string;
+    insightsEmpty: string;
+    adviceEmpty: string;
+    goalTarget: string;
+    goalHoursWeek: string;
   };
   onOpen: (id: string) => void;
   onGoalsChange?: (goals: LiveGoals) => void;
 };
 
-function fmtStat(n: number | null | undefined): string {
+function fmtStat(n: number | null | undefined, locale: string): string {
   if (n == null || !Number.isFinite(n)) return "—";
-  return n.toLocaleString("zh-CN");
+  return n.toLocaleString(locale === "en" ? "en-US" : "zh-CN");
 }
 
 export default function LiveOverview({
@@ -109,6 +115,7 @@ export default function LiveOverview({
   onGoalsChange,
 }: Props) {
   const { theme } = useTheme();
+  const { t, locale } = useI18n();
   const [period, setPeriod] = useState<PeriodKey>("30d");
   const [range, setRange] = useState<RangeKey>("30d");
   const [sort, setSort] = useState<SortKey>("date");
@@ -119,12 +126,21 @@ export default function LiveOverview({
   const trendOpt = useMemo(
     () =>
       core.dailyGifts.some((d) => d.gifts > 0)
-        ? dailyGiftsOption(core.dailyGifts)
+        ? dailyGiftsOption(core.dailyGifts, {
+            seriesName: t("liveChartGiftsEarned"),
+            tip: (n) => tf(t, "liveChartGiftsTip", { n }),
+          })
         : null,
-    [core.dailyGifts, theme],
+    [core.dailyGifts, theme, t],
   );
-  const insights = useMemo(() => buildOverviewInsights(sessions), [sessions]);
-  const advice = useMemo(() => buildSlotAdvice(sessions), [sessions]);
+  const insights = useMemo(
+    () => buildOverviewInsights(sessions, t, locale),
+    [sessions, t, locale],
+  );
+  const advice = useMemo(
+    () => buildSlotAdvice(sessions, t, locale),
+    [sessions, t, locale],
+  );
   const heat = useMemo(() => buildHeatmap(sessions), [sessions]);
   const heatHasData = useMemo(() => heat.some((c) => c.count > 0), [heat]);
   const baseline = useMemo(() => recentMedianBaseline(sessions), [sessions]);
@@ -140,27 +156,29 @@ export default function LiveOverview({
   const topInsights = insights.slice(0, 3);
 
   const metrics: { label: string; value: string }[] = [
-    { label: labels.gifts, value: fmt(core.totalGifts) },
-    { label: labels.senders, value: fmt(core.giftSenders) },
-    { label: labels.watchers, value: fmt(core.watchUcnt) },
+    { label: labels.gifts, value: fmt(core.totalGifts, locale) },
+    { label: labels.senders, value: fmt(core.giftSenders, locale) },
+    { label: labels.watchers, value: fmt(core.watchUcnt, locale) },
     {
       label: labels.avgWatch,
       value:
-        core.avgWatchMins != null ? `${core.avgWatchMins.toFixed(2)}分钟` : "—",
+        core.avgWatchMins != null
+          ? tf(t, "liveUnitMinF", { n: core.avgWatchMins.toFixed(2) })
+          : "—",
     },
-    { label: labels.followers, value: fmt(core.newFollowers) },
-    { label: labels.fansClub, value: fmt(core.newFansClub) },
-    { label: labels.comments, value: fmt(core.totalComments) },
-    { label: labels.likes, value: fmt(core.totalLikes) },
-    { label: labels.liveCount, value: fmt(core.sessionCount) },
+    { label: labels.followers, value: fmt(core.newFollowers, locale) },
+    { label: labels.fansClub, value: fmt(core.newFansClub, locale) },
+    { label: labels.comments, value: fmt(core.totalComments, locale) },
+    { label: labels.likes, value: fmt(core.totalLikes, locale) },
+    { label: labels.liveCount, value: fmt(core.sessionCount, locale) },
     {
       label: labels.liveDuration,
-      value: fmtDurMins(core.totalDuration),
+      value: fmtDurMins(core.totalDuration, t),
     },
   ];
 
   const nick = profile?.nickname?.trim() || "—";
-  const avatarLetter = nick !== "—" ? nick.slice(0, 1) : "主";
+  const avatarLetter = nick !== "—" ? nick.slice(0, 1) : "?";
   const [avatarBroken, setAvatarBroken] = useState(false);
   const avatarSrc = profile?.avatarUrl || null;
   const showAvatar = !!avatarSrc && !avatarBroken;
@@ -196,14 +214,15 @@ export default function LiveOverview({
               {progress.dailyGifts ? (
                 <p className="live-decision-body">
                   {labels.goalDailyGifts}{" "}
-                  {fmt(progress.dailyGifts.current)}/{fmt(progress.dailyGifts.target)}
+                  {fmt(progress.dailyGifts.current, locale)}/
+                  {fmt(progress.dailyGifts.target, locale)}
                 </p>
               ) : null}
               {progress.weeklyFollowers ? (
                 <p className="live-decision-body">
                   {labels.goalWeeklyFans}{" "}
-                  {fmt(progress.weeklyFollowers.current)}/
-                  {fmt(progress.weeklyFollowers.target)}
+                  {fmt(progress.weeklyFollowers.current, locale)}/
+                  {fmt(progress.weeklyFollowers.target, locale)}
                 </p>
               ) : null}
               {progress.weeklyDuration ? (
@@ -238,19 +257,19 @@ export default function LiveOverview({
           <div className="live-anchor-stats">
             <div className="live-anchor-stat">
               <span className="live-anchor-stat-val">
-                {fmtStat(profile?.diggCount)}
+                {fmtStat(profile?.diggCount, locale)}
               </span>
               <span className="live-anchor-stat-lab">{labels.digg}</span>
             </div>
             <div className="live-anchor-stat">
               <span className="live-anchor-stat-val">
-                {fmtStat(profile?.followingCount)}
+                {fmtStat(profile?.followingCount, locale)}
               </span>
               <span className="live-anchor-stat-lab">{labels.following}</span>
             </div>
             <div className="live-anchor-stat">
               <span className="live-anchor-stat-val">
-                {fmtStat(profile?.followerCount)}
+                {fmtStat(profile?.followerCount, locale)}
               </span>
               <span className="live-anchor-stat-lab">{labels.fans}</span>
             </div>
@@ -272,7 +291,7 @@ export default function LiveOverview({
                 ))}
               </ul>
             ) : (
-              <p className="muted live-anchor-empty">暂无总结</p>
+              <p className="muted live-anchor-empty">{labels.insightsEmpty}</p>
             )}
           </section>
 
@@ -288,7 +307,7 @@ export default function LiveOverview({
                 ) : null}
               </ul>
             ) : (
-              <p className="muted live-anchor-empty">暂无建议</p>
+              <p className="muted live-anchor-empty">{labels.adviceEmpty}</p>
             )}
           </section>
         </div>
@@ -359,7 +378,9 @@ export default function LiveOverview({
                   current={progress.dailyGifts.current}
                   target={progress.dailyGifts.target}
                   remainingLabel={labels.remaining}
-                  format={fmt}
+                  format={(n) => fmt(n, locale)}
+                  targetLabel={labels.goalTarget}
+                  hoursWeekLabel={labels.goalHoursWeek}
                   onTarget={(n) =>
                     onGoalsChange({ ...goals, dailyGifts: Math.max(0, n) })
                   }
@@ -371,7 +392,9 @@ export default function LiveOverview({
                   current={progress.weeklyFollowers.current}
                   target={progress.weeklyFollowers.target}
                   remainingLabel={labels.remaining}
-                  format={fmt}
+                  format={(n) => fmt(n, locale)}
+                  targetLabel={labels.goalTarget}
+                  hoursWeekLabel={labels.goalHoursWeek}
                   onTarget={(n) =>
                     onGoalsChange({
                       ...goals,
@@ -387,6 +410,8 @@ export default function LiveOverview({
                   target={progress.weeklyDuration.target}
                   remainingLabel={labels.remaining}
                   format={fmtDur}
+                  targetLabel={labels.goalTarget}
+                  hoursWeekLabel={labels.goalHoursWeek}
                   onTarget={(n) =>
                     onGoalsChange({
                       ...goals,
@@ -468,7 +493,7 @@ export default function LiveOverview({
                   <span>{s.date.slice(5)}</span>
                   <span className="live-table-title" title={s.title}>
                     <span className={`live-grade live-grade-${grade}`}>
-                      {gradeLabel(grade)}
+                      {gradeLabel(grade, t)}
                     </span>{" "}
                     {s.title}
                   </span>
@@ -480,9 +505,9 @@ export default function LiveOverview({
                           : Math.floor(Date.now() / 1000) - s.startTime),
                     )}
                   </span>
-                  <span>{fmt(s.totalGifts)}</span>
-                  <span>{fmt(eff.giftsPerHour)}</span>
-                  <span>{fmt(s.newFollowers)}</span>
+                  <span>{fmt(s.totalGifts, locale)}</span>
+                  <span>{fmt(eff.giftsPerHour, locale)}</span>
+                  <span>{fmt(s.newFollowers, locale)}</span>
                 </button>
               );
             })}
@@ -501,6 +526,8 @@ function GoalRow({
   format,
   onTarget,
   editHours,
+  targetLabel,
+  hoursWeekLabel,
 }: {
   label: string;
   current: number;
@@ -509,6 +536,8 @@ function GoalRow({
   format: (n: number) => string;
   onTarget: (n: number) => void;
   editHours?: boolean;
+  targetLabel: string;
+  hoursWeekLabel: string;
 }) {
   const pct = target > 0 ? Math.min(100, Math.round((current / target) * 100)) : 0;
   const remain = Math.max(0, target - current);
@@ -524,7 +553,7 @@ function GoalRow({
         <div className="live-goal-fill" style={{ width: `${pct}%` }} />
       </div>
       <label className="live-goal-edit muted">
-        目标
+        {targetLabel}
         <input
           type="number"
           min={0}
@@ -535,7 +564,7 @@ function GoalRow({
             onTarget(editHours ? Math.round(v * 3600) : Math.round(v));
           }}
         />
-        {editHours ? "小时/周" : ""}
+        {editHours ? hoursWeekLabel : ""}
       </label>
     </div>
   );

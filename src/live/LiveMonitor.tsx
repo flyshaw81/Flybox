@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
+import { useI18n } from "../i18n";
 import type { LiveGoals, LiveSession } from "./liveTypes";
 import { evaluateLiveAlerts } from "./liveAlerts";
 
-function fmt(n: number | null | undefined): string {
+function fmt(n: number | null | undefined, locale: string): string {
   if (n == null || !Number.isFinite(n)) return "—";
-  return Math.round(n).toLocaleString("zh-CN");
+  return Math.round(n).toLocaleString(locale === "en" ? "en-US" : "zh-CN");
 }
 
 function fmtRate(n: number | null | undefined): string {
@@ -80,12 +81,13 @@ export default function LiveMonitor({
   labels,
   onEnd,
 }: Props) {
+  const { t, locale } = useI18n();
   const [mode, setMode] = useState<ConvMode>("minute");
   const alerts = useMemo(
-    () => evaluateLiveAlerts(session, goals, allSessions),
+    () => evaluateLiveAlerts(session, goals, allSessions, t, locale),
     // dataPoints length drives recompute while live
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [session, goals, allSessions, session?.dataPoints.length, session?.totalGifts],
+    [session, goals, allSessions, session?.dataPoints.length, session?.totalGifts, t, locale],
   );
 
   const elapsed = session
@@ -267,15 +269,15 @@ export default function LiveMonitor({
             <div className="live-mon-stages">
               <div className="live-mon-stage">
                 <span>{conv.aLabel}</span>
-                <strong>{fmt(conv.a)}</strong>
+                <strong>{fmt(conv.a, locale)}</strong>
               </div>
               <div className="live-mon-stage">
                 <span>{conv.bLabel}</span>
-                <strong>{fmt(conv.b)}</strong>
+                <strong>{fmt(conv.b, locale)}</strong>
               </div>
               <div className="live-mon-stage">
                 <span>{conv.cLabel}</span>
-                <strong>{fmt(conv.c)}</strong>
+                <strong>{fmt(conv.c, locale)}</strong>
               </div>
             </div>
             <div className="live-mon-rates">
@@ -311,7 +313,7 @@ export default function LiveMonitor({
             {heat.map((c) => (
               <div key={c.label} className="live-mon-heat-cell">
                 <span>{c.label}</span>
-                <strong>{fmt(c.value)}</strong>
+                <strong>{fmt(c.value, locale)}</strong>
               </div>
             ))}
           </div>

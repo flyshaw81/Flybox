@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+﻿import { useMemo } from "react";
+import { useI18n } from "../i18n";
 import type { HeatCell } from "./insights";
+import { tf } from "./insights";
 
 /** 0 灰 + 1/2/3/5+ 四档（GitHub 贡献墙式） */
 const LEVELS = 5;
-const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
 /** 按场次：0→灰，1→1，2→2，3～4→3，≥5→4 */
 function levelBySessions(count: number): number {
@@ -21,6 +22,17 @@ type Props = {
 
 /** 标准月历热力：周一～周日 × 1～31 号，按开播场次上色 */
 export default function MonthHeatCalendar({ cells, title }: Props) {
+  const { t, locale } = useI18n();
+  const weekdays = [
+    t("liveWdMon"),
+    t("liveWdTue"),
+    t("liveWdWed"),
+    t("liveWdThu"),
+    t("liveWdFri"),
+    t("liveWdSat"),
+    t("liveWdSun"),
+  ];
+
   const { weeks, monthLabel } = useMemo(() => {
     if (!cells.length) {
       return { weeks: [] as Array<Array<HeatCell | null>>, monthLabel: "" };
@@ -45,11 +57,14 @@ export default function MonthHeatCalendar({ cells, title }: Props) {
     const [y, m] = first.date.split("-");
     return {
       weeks: rows,
-      monthLabel: y && m ? `${y}年${Number(m)}月` : "",
+      monthLabel:
+        y && m ? tf(t, "liveHeatMonth", { y, m: Number(m) }) : "",
     };
-  }, [cells]);
+  }, [cells, t]);
 
   if (!weeks.length) return null;
+
+  const loc = locale === "en" ? "en-US" : "zh-CN";
 
   return (
     <div className="live-slot-heat">
@@ -63,17 +78,17 @@ export default function MonthHeatCalendar({ cells, title }: Props) {
           ) : null}
         </span>
         <div className="live-slot-heat-legend" aria-hidden>
-          <span>0场</span>
+          <span>{t("liveHeatSessions0")}</span>
           {Array.from({ length: LEVELS }, (_, i) => (
             <i key={i} data-level={i} />
           ))}
-          <span>5场+</span>
+          <span>{t("liveHeatSessions5")}</span>
         </div>
       </div>
 
       <div className="live-month-cal">
         <div className="live-month-cal-head">
-          {WEEKDAYS.map((w) => (
+          {weekdays.map((w) => (
             <span key={w}>{w}</span>
           ))}
         </div>
@@ -94,8 +109,12 @@ export default function MonthHeatCalendar({ cells, title }: Props) {
               const level = levelBySessions(cell.count);
               const tip =
                 cell.count > 0
-                  ? `${cell.date} ${cell.count}场 · 音浪 ${cell.avgGifts.toLocaleString("zh-CN")}`
-                  : `${cell.date} 0场`;
+                  ? tf(t, "liveHeatTip", {
+                      date: cell.date,
+                      count: cell.count,
+                      gifts: cell.avgGifts.toLocaleString(loc),
+                    })
+                  : tf(t, "liveHeatTip0", { date: cell.date });
               return (
                 <span
                   key={cell.date}

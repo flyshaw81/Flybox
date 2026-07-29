@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { Check, ClipboardCopy, Download } from "lucide-react";
+import { useI18n } from "../i18n";
 import { useTheme } from "../theme";
 import LiveEChart from "./charts/LiveEChart";
 import { ageOption, channelOption, minuteOption } from "./charts/options";
@@ -13,12 +14,18 @@ import {
   buildSessionReportText,
   efficiency,
   labelMinuteMoments,
+  tf,
 } from "./insights";
+import {
+  localizeAgeBucket,
+  localizeChannelName,
+  localizePortraitText,
+} from "./localizeDisplay";
 
 const ICO = 15;
 
-function fmt(n: number): string {
-  return n.toLocaleString("zh-CN");
+function fmt(n: number, locale: string): string {
+  return n.toLocaleString(locale === "en" ? "en-US" : "zh-CN");
 }
 
 function fmtDur(sec: number): string {
@@ -130,6 +137,12 @@ type Props = {
     audienceMaint: string;
     lostAudience: string;
     highValueAudience: string;
+    copyFail: string;
+    exportFail: string;
+    prevSession: string;
+    funnelShowView: string;
+    funnelEnterRoom: string;
+    funnelGiftPay: string;
   };
   onBack: () => void;
 };
@@ -144,14 +157,15 @@ export default function SessionDetail({
   onBack,
 }: Props) {
   const { theme } = useTheme();
+  const { t, locale } = useI18n();
   const insight = useMemo(
-    () => buildSessionInsight(session, allSessions),
-    [session, allSessions],
+    () => buildSessionInsight(session, allSessions, t, locale),
+    [session, allSessions, t, locale],
   );
   const eff = useMemo(() => efficiency(session), [session]);
   const moments = useMemo(
-    () => labelMinuteMoments(session.minuteTrend),
-    [session.minuteTrend],
+    () => labelMinuteMoments(session.minuteTrend, t),
+    [session.minuteTrend, t],
   );
   const [portraitTab, setPortraitTab] = useState<"all" | "paid" | "fans">("all");
   const [copyState, setCopyState] = useState<"idle" | "ok" | "fail">("idle");
@@ -169,18 +183,40 @@ export default function SessionDetail({
     const list = session.trafficChannels ?? [];
     return list
       .slice()
+      .map((c) => ({
+        ...c,
+        name: localizeChannelName(c.name, locale),
+      }))
       .sort((a, b) => (b.watchPct ?? 0) - (a.watchPct ?? 0));
-  }, [session.trafficChannels]);
+  }, [session.trafficChannels, locale]);
   const funnel = session.trafficFunnel;
   const minutes = session.minuteTrend ?? [];
   const giftPeak = useMemo(() => peakMinute(minutes, "gifts"), [minutes]);
   const viewerPeak = useMemo(() => peakMinute(minutes, "viewers"), [minutes]);
-  const portrait: AudiencePortrait | null | undefined =
+  const rawPortrait: AudiencePortrait | null | undefined =
     portraitTab === "paid"
       ? session.portraitSlices?.paid ?? null
       : portraitTab === "fans"
         ? session.portraitSlices?.fans ?? null
         : session.portraitSlices?.all ?? session.audiencePortrait;
+  const portrait: AudiencePortrait | null | undefined = useMemo(() => {
+    if (!rawPortrait) return rawPortrait;
+    if (locale !== "en") return rawPortrait;
+    return {
+      ...rawPortrait,
+      genderText: localizePortraitText(rawPortrait.genderText, locale),
+      ageText: localizePortraitText(rawPortrait.ageText, locale),
+      regionText: localizePortraitText(rawPortrait.regionText, locale),
+      hobbyText: localizePortraitText(rawPortrait.hobbyText, locale),
+      honorText: localizePortraitText(rawPortrait.honorText, locale),
+      commentText: localizePortraitText(rawPortrait.commentText, locale),
+      fansText: localizePortraitText(rawPortrait.fansText, locale),
+      ages: rawPortrait.ages?.map((a) => ({
+        ...a,
+        name: localizeAgeBucket(a.name, locale),
+      })),
+    };
+  }, [rawPortrait, locale]);
   const hasSliceTabs = !!(
     session.portraitSlices?.paid ||
     session.portraitSlices?.fans
@@ -188,21 +224,36 @@ export default function SessionDetail({
   const maint = session.audienceMaintenance;
 
   const minuteOpt = useMemo(
-    () => (minutes.length >= 2 ? minuteOption(minutes, moments) : null),
-    [minutes, moments, theme],
+    () =>
+      minutes.length >= 2
+        ? minuteOption(minutes, moments, {
+            online: t("liveChartOnline"),
+            gifts: t("liveChartGifts"),
+            fans: t("liveChartFans"),
+          })
+        : null,
+    [minutes, moments, theme, t, locale],
   );
   const channelOpt = useMemo(
-    () => (channels.length ? channelOption(channels) : null),
-    [channels, theme],
+    () =>
+      channels.length
+        ? channelOption(channels, {
+            min: (n) => tf(t, "liveChartMin", { n }),
+            audience: (pct) => tf(t, "liveChartTipAudience", { pct }),
+            avg: (avg) => tf(t, "liveChartTipAvg", { avg }),
+            rev: (pct) => tf(t, "liveChartTipRev", { pct }),
+          })
+        : null,
+    [channels, theme, t, locale],
   );
   const ageOpt = useMemo(
     () =>
       portrait?.ages && portrait.ages.length ? ageOption(portrait.ages) : null,
-    [portrait, theme],
+    [portrait, theme, locale],
   );
 
   async function copyReport() {
-    const text = buildSessionReportText(session, allSessions);
+    const text = buildSessionReportText(session, allSessions, t, locale);
     try {
       await writeText(text);
       setCopyState("ok");
@@ -218,14 +269,14 @@ export default function SessionDetail({
   }
 
   async function exportReport() {
-    const text = buildSessionReportText(session, allSessions);
+    const text = buildSessionReportText(session, allSessions, t, locale);
     const d = new Date(session.startTime * 1000);
     const pad = (n: number) => String(n).padStart(2, "0");
     const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
     try {
       const picked = await save({
         title: labels.exportReport,
-        defaultPath: `FLYBOX复盘_${stamp}.txt`,
+        defaultPath: tf(t, "liveReportFile", { stamp }),
         filters: [{ name: "Text", extensions: ["txt"] }],
       });
       if (!picked) return;
@@ -255,10 +306,10 @@ export default function SessionDetail({
   const coreKpis = [
     {
       label: labels.peak,
-      value: fmt(session.peakViewers || session.watchUcnt || 0),
+      value: fmt(session.peakViewers || session.watchUcnt || 0, locale),
     },
-    { label: labels.gifts, value: fmt(session.totalGifts) },
-    { label: labels.followers, value: fmt(session.newFollowers) },
+    { label: labels.gifts, value: fmt(session.totalGifts, locale) },
+    { label: labels.followers, value: fmt(session.newFollowers, locale) },
     {
       label: labels.enterRate,
       value:
@@ -268,10 +319,10 @@ export default function SessionDetail({
       label: labels.avgStay,
       value:
         session.avgWatchMins != null
-          ? `${session.avgWatchMins.toFixed(1)}m`
+          ? tf(t, "liveUnitMinF", { n: session.avgWatchMins.toFixed(1) })
           : "—",
     },
-    { label: labels.giftsPerHour, value: fmt(eff.giftsPerHour) },
+    { label: labels.giftsPerHour, value: fmt(eff.giftsPerHour, locale) },
     { label: labels.fansPerHour, value: String(eff.followersPerHour) },
     {
       label: labels.consumeRate,
@@ -317,7 +368,7 @@ export default function SessionDetail({
             copyState === "ok"
               ? labels.copyReportOk
               : copyState === "fail"
-                ? "复制失败"
+                ? labels.copyFail
                 : labels.copyReport
           }
           aria-label={labels.copyReport}
@@ -332,7 +383,7 @@ export default function SessionDetail({
             exportState === "ok"
               ? labels.exportReportOk
               : exportState === "fail"
-                ? "导出失败"
+                ? labels.exportFail
                 : labels.exportReport
           }
           aria-label={labels.exportReport}
@@ -366,10 +417,10 @@ export default function SessionDetail({
             <p className="muted live-traffic-note">
               {labels.minutePeak}
               {giftPeak && giftPeak.gifts > 0
-                ? ` · ${labels.minuteGifts} ${shortClock(giftPeak.t)}（${fmt(giftPeak.gifts)}）`
+                ? ` · ${labels.minuteGifts} ${shortClock(giftPeak.t)}（${fmt(giftPeak.gifts, locale)}）`
                 : ""}
               {viewerPeak && viewerPeak.viewers > 0
-                ? ` · ${labels.minuteViewers} ${shortClock(viewerPeak.t)}（${fmt(viewerPeak.viewers)}）`
+                ? ` · ${labels.minuteViewers} ${shortClock(viewerPeak.t)}（${fmt(viewerPeak.viewers, locale)}）`
                 : ""}
             </p>
             {moments.length ? (
@@ -379,7 +430,7 @@ export default function SessionDetail({
                     key={`${m.kind}-${m.label}-${m.clock}`}
                     className={`live-moment live-moment-${m.kind}`}
                   >
-                    {m.label} {m.clock}（{fmt(m.value)}）
+                    {m.label} {m.clock}（{fmt(m.value, locale)}）
                   </span>
                 ))}
               </div>
@@ -405,9 +456,9 @@ export default function SessionDetail({
             <PayFunnel
               funnel={funnel}
               labels={{
-                show: "曝光展现",
-                enter: "进直播间",
-                pay: "打赏送礼",
+                show: labels.funnelShowView,
+                enter: labels.funnelEnterRoom,
+                pay: labels.funnelGiftPay,
                 enterRate: labels.funnelEnterRate,
                 payRate: labels.funnelPayRate,
                 vs7: labels.funnelVs7,
@@ -472,7 +523,7 @@ export default function SessionDetail({
                       k: labels.lostAudience,
                       v:
                         maint.lostCount != null
-                          ? `${fmt(maint.lostCount)}${
+                          ? `${fmt(maint.lostCount, locale)}${
                               maint.lostSamples?.length
                                 ? `（${maint.lostSamples.join("、")}）`
                                 : ""
@@ -485,7 +536,7 @@ export default function SessionDetail({
                       k: labels.highValueAudience,
                       v:
                         maint.highValueCount != null
-                          ? `${fmt(maint.highValueCount)}${
+                          ? `${fmt(maint.highValueCount, locale)}${
                               maint.highValueSamples?.length
                                 ? `（${maint.highValueSamples.join("、")}）`
                                 : ""
@@ -533,9 +584,11 @@ export default function SessionDetail({
                       {fmtPct(d)}
                     </span>
                   </div>
-                  <div className="live-compare-tile-value">{fmt(m.value)}</div>
+                  <div className="live-compare-tile-value">
+                    {fmt(m.value, locale)}
+                  </div>
                   <div className="muted live-compare-tile-prev">
-                    上场 {fmt(m.prev ?? 0)}
+                    {labels.prevSession} {fmt(m.prev ?? 0, locale)}
                   </div>
                 </div>
               );

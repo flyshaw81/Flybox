@@ -94,7 +94,7 @@ function recentSessions(sessions: LiveSession[], n: number): LiveSession[] {
 }
 
 export default function LiveModule({ embedded, onChromeChange }: Props) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [booting, setBooting] = useState(true);
   const [data, setData] = useState<LiveStoreData>({
     loggedIn: false,
@@ -309,7 +309,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       try {
         const list = dataRef.current.sessions;
         const target = list.find((x) => x.id === openId) ?? done;
-        const text = buildSessionReportText(target, list);
+        const text = buildSessionReportText(target, list, t, locale);
         await writeText(text);
         noticeParts = noticeParts.filter((p) => p !== t("livePostEndSyncing"));
         noticeParts.push(t("livePostEndCopied"));
@@ -321,7 +321,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       }
       window.setTimeout(() => setPostEndNotice(null), 6000);
     },
-    [needRelogin, persist, t],
+    [needRelogin, persist, t, locale],
   );
 
   const applyScrape = useCallback(
@@ -950,6 +950,7 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       ) : null}
       {section === "analysis" && view === "detail" && detailSession ? (
         <SessionDetail
+          key={`detail-${locale}-${detailSession.id}`}
           session={detailSession}
           allSessions={data.sessions}
           prev={prevSession}
@@ -1023,6 +1024,12 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
             audienceMaint: t("liveAudienceMaint"),
             lostAudience: t("liveLostAudience"),
             highValueAudience: t("liveHighValueAudience"),
+            copyFail: t("liveCopyFail"),
+            exportFail: t("liveExportFail"),
+            prevSession: t("livePrevSession"),
+            funnelShowView: t("liveFunnelShowView"),
+            funnelEnterRoom: t("liveFunnelEnterRoom"),
+            funnelGiftPay: t("liveFunnelGift"),
           }}
           onBack={() => {
             setDetailId(null);
@@ -1074,6 +1081,10 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
             digg: t("liveProfileDigg"),
             following: t("liveProfileFollowing"),
             fans: t("liveProfileFans"),
+            insightsEmpty: t("liveInsightsEmpty"),
+            adviceEmpty: t("liveAdviceEmpty"),
+            goalTarget: t("liveGoalTarget"),
+            goalHoursWeek: t("liveGoalHoursWeek"),
           }}
           profile={data.profile}
           onOpen={(id) => {
