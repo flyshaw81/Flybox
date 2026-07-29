@@ -1,7 +1,7 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
-/** Same density OpenChatCut / CapCut use for timeline audio. */
-const PEAKS_PER_SECOND = 100;
+/** Timeline density: enough for zoom, far cheaper than full decode. */
+const PEAKS_PER_SECOND = 48;
 
 export type PeakData = {
   peaks: Float32Array;
@@ -12,44 +12,95 @@ export type PeakData = {
 const cache = new Map<string, PeakData>();
 const inflight = new Map<string, Promise<PeakData>>();
 
-function yieldFrame(): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, 0);
-  });
+function cacheKey(path: string, buckets: number): string {
+  return `v5:${buckets}:${path}`;
 }
 
-function cacheKey(path: string): string {
-  return `v4:${PEAKS_PER_SECOND}:${path}`;
+function bucketCount(durationMs: number): number {
+  const sec = Math.max(0.5, durationMs / 1000);
+  return Math.min(4096, Math.max(128, Math.ceil(sec * PEAKS_PER_SECOND)));
 }
 
-/** Decode once → time-indexed peak envelope (peaks/sec). */
-export async function loadPeaks(path: string): Promise<PeakData> {
-  const key = cacheKey(path);
+function toPeakData(
+  raw: number[] | Float32Array,
+  durationMs: number,
+): PeakData {
+  const n = raw.length;
+  const peaks = new Float32Array(n);
+  let peak = 0.0001;
+  for (let i = 0; i < n; i++) {
+    const v = raw[i] ?? 0;
+    if (v > peak) peak = v;
+  }
+  const inv = 1 / peak;
+  for (let i = 0; i < n; i++) {
+    peaks[i] = Math.min(1, (raw[i] ?? 0) * inv);
+  }
+  const dur = Math.max(1, durationMs);
+  return {
+    peaks,
+    peaksPerSecond: peaks.length / (dur / 1000),
+    durationMs: dur,
+  };
+}
+
+/** Prefer native ffmpeg peaks (8kHz + disk cache); browser decode only as fallback. */
+export async function loadPeaks(
+  path: string,
+  durationHintMs?: number | null,
+): Promise<PeakData> {
+  const hint = durationHintMs && durationHintMs > 0 ? durationHintMs : 0;
+  const buckets = bucketCount(hint || 60_000);
+  const key = cacheKey(path, buckets);
   const hit = cache.get(key);
   if (hit) return hit;
   const pending = inflight.get(key);
   if (pending) return pending;
 
   const job = (async (): Promise<PeakData> => {
+    // 1) 后端：快 + 可缓存
+    try {
+      const peaks = await invoke<number[]>("sfx_waveform", {
+        path,
+        buckets,
+      });
+      let durationMs = hint;
+      if (!durationMs) {
+        try {
+          const info = await invoke<{ durationMs?: number | null }>("sfx_probe", {
+            path,
+          });
+          durationMs = info.durationMs ?? 0;
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!durationMs) {
+        // 粗估：按 48 峰/秒反推
+        durationMs = Math.max(1, Math.round((peaks.length / PEAKS_PER_SECOND) * 1000));
+      }
+      const data = toPeakData(peaks, durationMs);
+      cache.set(key, data);
+      return data;
+    } catch {
+      /* fall through to browser */
+    }
+
+    // 2) 浏览器备用：全文件解码（慢），加大步长、少 yield
     const url = convertFileSrc(path);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`waveform fetch ${res.status}`);
     const raw = await res.arrayBuffer();
-    await yieldFrame();
     const ctx = new AudioContext();
     try {
       const audio = await ctx.decodeAudioData(raw.slice(0));
-      await yieldFrame();
       const ch = audio.getChannelData(0);
       const durationMs = Math.max(1, Math.round(audio.duration * 1000));
-      const buckets = Math.max(
-        2,
-        Math.ceil((durationMs / 1000) * PEAKS_PER_SECOND),
-      );
-      const peaks = new Float32Array(buckets);
-      const block = Math.max(1, Math.floor(ch.length / buckets));
-      const stride = Math.max(1, Math.floor(block / 48));
-      for (let i = 0; i < buckets; i++) {
+      const nBuckets = bucketCount(durationMs);
+      const peaks = new Float32Array(nBuckets);
+      const block = Math.max(1, Math.floor(ch.length / nBuckets));
+      const stride = Math.max(1, Math.floor(block / 32));
+      for (let i = 0; i < nBuckets; i++) {
         let max = 0;
         const start = i * block;
         const end = Math.min(ch.length, start + block);
@@ -58,20 +109,9 @@ export async function loadPeaks(path: string): Promise<PeakData> {
           if (v > max) max = v;
         }
         peaks[i] = max;
-        if (i > 0 && i % 200 === 0) await yieldFrame();
       }
-      let peak = 0.0001;
-      for (let i = 0; i < peaks.length; i++) peak = Math.max(peak, peaks[i]);
-      const inv = 1 / peak;
-      for (let i = 0; i < peaks.length; i++) {
-        peaks[i] = Math.min(1, peaks[i] * inv);
-      }
-      const data: PeakData = {
-        peaks,
-        peaksPerSecond: PEAKS_PER_SECOND,
-        durationMs,
-      };
-      cache.set(key, data);
+      const data = toPeakData(peaks, durationMs);
+      cache.set(cacheKey(path, nBuckets), data);
       return data;
     } finally {
       void ctx.close();
@@ -80,11 +120,15 @@ export async function loadPeaks(path: string): Promise<PeakData> {
   })();
 
   inflight.set(key, job);
-  return job;
+  try {
+    return await job;
+  } finally {
+    inflight.delete(key);
+  }
 }
 
 /**
- * CapCut / OpenChatCut bar waveform:
+ * CapCut-style bar waveform:
  * one vertical stroke every ~2px; each column = max peak in that time window.
  */
 export function peaksSvgPath(

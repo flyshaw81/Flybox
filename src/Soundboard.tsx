@@ -125,6 +125,9 @@ type SfxSettings = {
   itemMeta: Record<string, ItemMeta>;
   mySfx: string[];
   myBgm: string[];
+  /** 混剪素材收藏（与「我的音效 / 背景音乐」无关） */
+  studioFavSfx: string[];
+  studioFavBgm: string[];
   recent: string[];
   lastCategory: string | null;
   tab: Tab;
@@ -184,6 +187,8 @@ const DEFAULT_SETTINGS: SfxSettings = {
   itemMeta: {},
   mySfx: [],
   myBgm: [],
+  studioFavSfx: [],
+  studioFavBgm: [],
   recent: [],
   lastCategory: null,
   tab: "bgm",
@@ -258,12 +263,14 @@ function migrateSettings(saved: Partial<SfxSettings>): SfxSettings {
   const rev = typeof saved.sfxSettingsRev === "number" ? saved.sfxSettingsRev : 0;
   // rev<1: old default was interrupt=false (stack). Live use expects cut-on-switch.
   const interrupt = rev < 1 ? true : (saved.interrupt ?? true);
-  return {
+  const out: SfxSettings = {
     ...DEFAULT_SETTINGS,
     ...saved,
     itemMeta: saved.itemMeta ?? {},
     mySfx,
     myBgm: saved.myBgm ?? [],
+    studioFavSfx: Array.isArray(saved.studioFavSfx) ? saved.studioFavSfx : [],
+    studioFavBgm: Array.isArray(saved.studioFavBgm) ? saved.studioFavBgm : [],
     recent: saved.recent ?? [],
     lastCategory: saved.lastCategory ?? null,
     bgmVolume: saved.bgmVolume ?? DEFAULT_SETTINGS.bgmVolume,
@@ -294,6 +301,10 @@ function migrateSettings(saved: Partial<SfxSettings>): SfxSettings {
       null,
     tab,
   };
+  // 上场模式已删除：清掉旧配置里可能残留的字段
+  delete (out as { stageMode?: unknown }).stageMode;
+  delete (out as { stagePreset?: unknown }).stagePreset;
+  return out;
 }
 
 export default function Soundboard({
@@ -312,6 +323,9 @@ export default function Soundboard({
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hotkeyWarn, setHotkeyWarn] = useState<string | null>(null);
+  const [testToneBusy, setTestToneBusy] = useState(false);
+
   const [ctx, setCtx] = useState<CtxMenuState>(null);
   const [capturingPath, setCapturingPath] = useState<string | null>(null);
   const [capturingStop, setCapturingStop] = useState(false);
@@ -331,7 +345,11 @@ export default function Soundboard({
     null,
   );
   const [studioQuery, setStudioQuery] = useState("");
-  const [studioKind, setStudioKind] = useState<"sfx" | "bgm">("sfx");
+  const [studioKind, setStudioKind] = useState<"sfx" | "bgm" | "fav">("sfx");
+  /** 收藏页内：全部 / 音效 / 音乐 */
+  const [studioFavFilter, setStudioFavFilter] = useState<
+    "all" | "sfx" | "bgm"
+  >("all");
   const [recording, setRecording] = useState(false);
   const [recElapsedMs, setRecElapsedMs] = useState(0);
   const [recPeak, setRecPeak] = useState(0);
@@ -574,35 +592,72 @@ export default function Soundboard({
     return () => window.clearInterval(id);
   }, [ready, settings.libraryPath, settings.tab, refreshBgm]);
 
+  /** shortcutId → 绑定语义键（__stop__ 或 path），用于差量注册 */
+  const hotkeyMapRef = useRef<Map<string, string>>(new Map());
+  const hotkeyFnRef = useRef<Map<string, () => void>>(new Map());
+
   const syncHotkeys = useCallback(async () => {
-    try {
-      await unregisterAll();
-    } catch {
-      /* ignore */
-    }
     const s = settingsRef.current;
-    const bind = async (hotkey: string, fn: () => void) => {
+    const desired = new Map<string, { key: string; fn: () => void }>();
+    const usedKeys = new Set<string>();
+    let conflict = false;
+    let fail = false;
+
+    const add = (hotkey: string | undefined, key: string, fn: () => void) => {
+      if (!hotkey) return;
       const id = toShortcutId(hotkey);
       if (!id) return;
-      try {
-        if (await isRegistered(id)) await unregister(id);
-        await register(id, (event) => {
-          if (event.state === "Pressed") fn();
-        });
-      } catch {
-        /* conflict / unsupported */
+      if (desired.has(id) || usedKeys.has(id)) {
+        conflict = true;
+        return;
       }
+      usedKeys.add(id);
+      desired.set(id, { key, fn });
     };
-    if (s.stopHotkey) {
-      await bind(s.stopHotkey, () => void stopAll());
-    }
+
+    add(s.stopHotkey, "__stop__", () => void stopAll());
     for (const path of s.mySfx) {
       const hk = s.itemMeta[path]?.hotkey;
       if (!hk) continue;
       const p = path;
-      await bind(hk, () => void playSfx(p));
+      add(hk, p, () => void playSfx(p));
     }
-  }, [playSfx, stopAll]);
+
+    const prev = hotkeyMapRef.current;
+    // 卸掉不再需要的
+    for (const [id] of prev) {
+      if (desired.has(id)) continue;
+      try {
+        if (await isRegistered(id)) await unregister(id);
+      } catch {
+        /* ignore */
+      }
+      prev.delete(id);
+      hotkeyFnRef.current.delete(id);
+    }
+    // 注册新的或函数需刷新的（同 id 也重绑，保证 playSfx 闭包最新）
+    for (const [id, { key, fn }] of desired) {
+      const same = prev.get(id) === key;
+      hotkeyFnRef.current.set(id, fn);
+      if (same) continue;
+      try {
+        if (await isRegistered(id)) await unregister(id);
+        await register(id, (event) => {
+          if (event.state !== "Pressed") return;
+          hotkeyFnRef.current.get(id)?.();
+        });
+        prev.set(id, key);
+      } catch {
+        fail = true;
+        prev.delete(id);
+        hotkeyFnRef.current.delete(id);
+      }
+    }
+    hotkeyMapRef.current = prev;
+    if (conflict) setHotkeyWarn(t("sfxHotkeyConflict"));
+    else if (fail) setHotkeyWarn(t("sfxHotkeyBindFail"));
+    else setHotkeyWarn(null);
+  }, [playSfx, stopAll, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -753,22 +808,69 @@ export default function Soundboard({
     return entries.filter((e) => e.category === category);
   }, [entries, category, query, settings.itemMeta, recentEntries]);
 
-  /** 制作页：按音效 / BGM 分流；有搜索词才列，避免一进来铺满曲库 */
+  /** 制作页：音效 / BGM / 混剪收藏（收藏与直播 mySfx·myBgm 无关） */
   const studioVisible = useMemo(() => {
     const q = studioQuery.trim().toLowerCase();
-    if (!q) return [];
     const bgmSet = new Set(settings.myBgm);
-    const pool =
-      studioKind === "bgm"
-        ? entries.filter((e) => bgmSet.has(e.path))
-        : entries.filter((e) => !bgmSet.has(e.path));
+    let pool: SfxEntry[];
+    if (studioKind === "fav") {
+      const paths =
+        studioFavFilter === "sfx"
+          ? settings.studioFavSfx
+          : studioFavFilter === "bgm"
+            ? settings.studioFavBgm
+            : [...settings.studioFavSfx, ...settings.studioFavBgm];
+      // 保序去重
+      const seen = new Set<string>();
+      pool = [];
+      for (const p of paths) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        const e = byPath.get(p);
+        if (e) pool.push(e);
+      }
+    } else if (studioKind === "bgm") {
+      pool = entries.filter((e) => bgmSet.has(e.path));
+    } else {
+      pool = entries.filter((e) => !bgmSet.has(e.path));
+    }
+    if (!q) return pool;
     return pool.filter((e) => {
       const label = (
         settings.itemMeta[e.path]?.displayName || e.name
       ).toLowerCase();
       return label.includes(q) || e.category.toLowerCase().includes(q);
     });
-  }, [entries, studioQuery, studioKind, settings.itemMeta, settings.myBgm]);
+  }, [
+    entries,
+    studioQuery,
+    studioKind,
+    studioFavFilter,
+    settings.itemMeta,
+    settings.myBgm,
+    settings.studioFavSfx,
+    settings.studioFavBgm,
+    byPath,
+  ]);
+
+  const toggleStudioFav = useCallback(
+    async (path: string, kind: "sfx" | "bgm") => {
+      const next = { ...settingsRef.current };
+      if (kind === "sfx") {
+        const set = new Set(next.studioFavSfx);
+        if (set.has(path)) set.delete(path);
+        else set.add(path);
+        next.studioFavSfx = [...set];
+      } else {
+        const set = new Set(next.studioFavBgm);
+        if (set.has(path)) set.delete(path);
+        else set.add(path);
+        next.studioFavBgm = [...set];
+      }
+      await persist(next);
+    },
+    [persist],
+  );
 
   const mySfxEntries = useMemo(
     () => settings.mySfx.map((p) => byPath.get(p)).filter(Boolean) as SfxEntry[],
@@ -1387,6 +1489,20 @@ export default function Soundboard({
     return () => window.clearInterval(id);
   }, [recording]);
 
+  const playTestTone = useCallback(async () => {
+    setTestToneBusy(true);
+    try {
+      await invoke("sfx_test_tone", { volume: 0.75 });
+      setError(null);
+      setHotkeyWarn(t("sfxTestOutputOk"));
+      window.setTimeout(() => setHotkeyWarn(null), 2000);
+    } catch (e) {
+      setError(`${t("sfxTestOutputFail")}: ${String(e)}`);
+    } finally {
+      setTestToneBusy(false);
+    }
+  }, [t]);
+
   const tools: ReactNode = (
     <>
       <button type="button" className="icon-btn" title={t("sfxStopAll")} onClick={() => void stopAll()}>
@@ -1708,6 +1824,11 @@ export default function Soundboard({
         .join(" ")}
     >
       {error && <div className="banner error">{error}</div>}
+      {hotkeyWarn && !error ? (
+        <div className="banner sfx-info-banner" role="status">
+          {hotkeyWarn}
+        </div>
+      ) : null}
 
       {!settings.libraryPath ? (
         <div className="empty">
@@ -2326,7 +2447,23 @@ export default function Soundboard({
               onStudioQuery={setStudioQuery}
               studioKind={studioKind}
               onStudioKind={setStudioKind}
+              studioFavFilter={studioFavFilter}
+              onStudioFavFilter={setStudioFavFilter}
               studioVisible={studioVisible}
+              favoritedPaths={[
+                ...settings.studioFavSfx,
+                ...settings.studioFavBgm,
+              ]}
+              onToggleFavorite={(path) => {
+                // 混剪收藏：与 mySfx / myBgm 无关
+                let kind: "sfx" | "bgm" = "sfx";
+                if (studioKind === "bgm") kind = "bgm";
+                else if (studioKind === "sfx") kind = "sfx";
+                else if (settings.studioFavBgm.includes(path)) kind = "bgm";
+                else if (settings.studioFavSfx.includes(path)) kind = "sfx";
+                else if (settings.myBgm.includes(path)) kind = "bgm";
+                void toggleStudioFav(path, kind);
+              }}
               padLabel={padLabel}
               dragOver={dragOver}
               recording={recording}
@@ -2398,6 +2535,18 @@ export default function Soundboard({
                         ))}
                       </select>
                     </label>
+                    <div className="sfx-set-row">
+                      <span className="sfx-set-label">{t("sfxTestOutput")}</span>
+                      <button
+                        type="button"
+                        className="settings-path-btn"
+                        disabled={testToneBusy}
+                        title={t("sfxTestOutputHint")}
+                        onClick={() => void playTestTone()}
+                      >
+                        {t("sfxTestOutput")}
+                      </button>
+                    </div>
                     <label className="sfx-set-row">
                       <span className="sfx-set-label">{t("sfxMasterVolume")}</span>
                       <input

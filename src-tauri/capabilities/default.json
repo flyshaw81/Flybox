@@ -53,6 +53,8 @@
     "allow-sfx-resume-bgm",
     "allow-sfx-seek-bgm",
     "allow-sfx-play",
+    "allow-sfx-test-tone",
+    "allow-sfx-render-clip-fx",
     "allow-sfx-play-bgm",
     "allow-sfx-bgm-status",
     "allow-sfx-probe",

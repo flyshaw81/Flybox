@@ -727,6 +727,32 @@ button.logo-btn:hover {
   background: transparent;
 }
 
+/* 浅色：全局滚动条不要深灰/黑条（混剪底部偶发「黑边」就是它） */
+[data-theme="light"] * {
+  scrollbar-color: #c5c9d2 transparent;
+}
+
+[data-theme="light"] *::-webkit-scrollbar-thumb {
+  background: #c5c9d2;
+}
+
+[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+  background: #aeb4c0;
+}
+
+[data-theme="light"] *::-webkit-scrollbar-track,
+[data-theme="light"] *::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+[data-theme="light"] .content::-webkit-scrollbar-thumb {
+  background: #c5c9d2;
+}
+
+[data-theme="light"] .content::-webkit-scrollbar-thumb:hover {
+  background: #aeb4c0;
+}
+
 /* Lightbox open: keep gallery in DOM (preserve scroll) but hide visually */
 .content-hold {
   visibility: hidden;
@@ -2468,12 +2494,15 @@ html.is-resizing .darkveil-canvas {
   width: 160px;
 }
 
-/* FLYBOX ???? ?? ???????????? */
+/* FLYBOX 悬停提示：必须横向，禁止被挤成一字一行竖排 */
 .fly-tip {
   position: fixed;
   z-index: 10001;
   transform: translateX(-50%) translateY(4px);
-  max-width: min(260px, calc(100vw - 20px));
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+  min-width: 0;
   padding: 7px 12px;
   background: color-mix(in srgb, var(--menu-bg) 88%, #000);
   border: none;
@@ -2486,14 +2515,26 @@ html.is-resizing .darkveil-canvas {
   letter-spacing: 0.02em;
   border-radius: 8px;
   pointer-events: none;
-  white-space: pre-wrap;
-  word-break: break-word;
+  /* 强制横排；短文案单行，过长再换行（不是逐字竖排） */
+  writing-mode: horizontal-tb !important;
+  direction: ltr;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
   -webkit-user-select: none;
   user-select: none;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   opacity: 0;
   animation: fly-tip-in 0.16s ease forwards;
+}
+
+/* 超长文案允许折行，但保持横向段落 */
+.fly-tip.fly-tip-multiline {
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .fly-tip-above {
@@ -2754,6 +2795,13 @@ html.is-resizing .darkveil-canvas {
   margin-bottom: 12px;
 }
 
+.settings-section-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
 .settings-section-label {
   font-size: 11px;
   font-weight: 600;
@@ -2977,6 +3025,11 @@ html.is-resizing .darkveil-canvas {
 }
 
 /* ??????? ???*/
+.sfx-info-banner {
+  background: color-mix(in srgb, var(--accent, #3cb371) 14%, transparent);
+  color: var(--text, inherit);
+}
+
 .sfx-shell {
   flex: 1;
   min-height: 0;
@@ -4744,11 +4797,606 @@ html.is-resizing .darkveil-canvas {
 .sfx-studio {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 12px 14px 18px;
-  overflow: auto;
+  gap: 0;
+  padding: 10px;
+  overflow: hidden;
   min-height: 0;
   flex: 1;
+  /* 底板略深，三个浮块才「浮」得起来 */
+  background: #0f0f0f;
+  color: #e8e8e8;
+}
+
+/* 三个浮块共用：圆角 + 轻边 + 阴影 */
+.sfx-studio-float {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #1c1c1c;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* 上下分隔：悬停出 ↕ 箭头光标，拖动改高度（不显示高亮线） */
+.sfx-studio-vsplit {
+  flex: 0 0 10px;
+  position: relative;
+  z-index: 6;
+  cursor: ns-resize;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  touch-action: none;
+  user-select: none;
+  background: transparent;
+}
+
+/* 左右分隔：悬停出 ↔ 箭头光标，拖动改声音设置宽度（不显示高亮线） */
+.sfx-studio-hsplit {
+  flex: 0 0 10px;
+  position: relative;
+  z-index: 6;
+  cursor: ew-resize;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  touch-action: none;
+  user-select: none;
+  align-self: stretch;
+  background: transparent;
+}
+
+/* 上：素材搜索 | 声音设置  下：混剪（高度可拖） */
+.sfx-studio-upper {
+  display: flex;
+  flex: 0 0 38%;
+  min-height: 140px;
+  max-height: none;
+  overflow: hidden;
+  gap: 0;
+  border-bottom: none;
+  background: transparent;
+}
+
+.sfx-studio-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 10px 16px 2px;
+}
+
+.sfx-studio-panel-head-insp {
+  padding-bottom: 2px;
+}
+
+.sfx-studio-panel-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #bdbdbd;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.sfx-tl-area-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #bdbdbd;
+  letter-spacing: 0.04em;
+  padding: 0 2px 0 0;
+}
+
+.sfx-studio-lower {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 160px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.sfx-studio-lower > .sfx-studio-card.edit {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: #1c1c1c;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 0;
+  gap: 0;
+}
+
+.sfx-studio-inspector {
+  /* 宽度由拖动手柄 / 内联 style 控制 */
+  width: 300px;
+  flex: 0 0 300px;
+  max-width: 50%;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: #1c1c1c;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.sfx-insp-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0;
+  margin: 0;
+  padding: 0 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+/* 混剪工具栏里的录音峰值（音量/麦已迁到此栏） */
+.sfx-studio-lower .sfx-tl-tool.sfx-rec-icon.on {
+  color: var(--accent);
+  position: relative;
+}
+
+.sfx-studio-lower .sfx-rec-meter.icon {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 3px;
+  width: auto;
+  height: 2px;
+  border-radius: 999px;
+}
+
+.sfx-insp-tab {
+  flex: 1;
+  height: 38px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: #7a7a7a;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s ease;
+}
+
+.sfx-insp-tab:hover {
+  color: #d0d0d0;
+}
+
+.sfx-insp-tab.on {
+  color: #f2f2f2;
+  box-shadow: inset 0 -2px 0 #f2f2f2;
+}
+
+.sfx-insp-empty {
+  margin: auto 22px;
+  padding: 28px 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: #666;
+  text-align: center;
+}
+
+.sfx-insp-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 顶栏：文件名 + 小试听钮 */
+.sfx-insp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sfx-insp-clip-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f0f0f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfx-insp-preview-btn {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f0f0f0;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+  white-space: nowrap;
+}
+
+.sfx-insp-preview-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.sfx-insp-preview-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 每项：上行「名称 · 数值」，下行整条滑条 */
+.sfx-insp-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sfx-insp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sfx-insp-field-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 18px;
+}
+
+.sfx-insp-field-top span {
+  font-size: 12px;
+  font-weight: 500;
+  color: #b0b0b0;
+}
+
+.sfx-insp-field-top em {
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8e8e8;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.sfx-insp-field input[type="range"] {
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  min-width: 0;
+  accent-color: #d8d8d8;
+  cursor: pointer;
+}
+
+/* 兼容旧 row（若别处还在用） */
+.sfx-insp-row {
+  display: grid;
+  grid-template-columns: 48px 1fr 42px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sfx-insp-row span {
+  color: #8a8a8a;
+}
+
+.sfx-insp-row em {
+  font-style: normal;
+  font-size: 11px;
+  text-align: right;
+  color: #a8a8a8;
+  font-variant-numeric: tabular-nums;
+}
+
+.sfx-insp-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: #d0d0d0;
+}
+
+.sfx-insp-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #6e6e6e;
+}
+
+.sfx-insp-chips {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sfx-insp-chips-speed {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.sfx-insp-chip {
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
+  color: #c8c8c8;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.sfx-insp-chip:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #f2f2f2;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.sfx-insp-chip.on {
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 素材搜索（上半左侧浮块） */
+.sfx-studio-lib {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: #1c1c1c;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.sfx-studio-lib .sfx-studio-top {
+  padding: 12px 16px 10px;
+  gap: 10px;
+  border-bottom: none;
+}
+
+.sfx-studio-lib-grid {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 2px 16px 14px;
+  align-content: start;
+}
+
+.sfx-studio-lib-grid::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sfx-studio-lib-grid::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+}
+
+.sfx-studio-lib-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 36px 12px;
+  font-size: 12px;
+  text-align: center;
+  color: #666;
+}
+
+.sfx-studio-lib-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 54px;
+  padding: 10px 10px 10px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: #242424;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.1s ease, border-color 0.1s ease;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.sfx-studio-lib-card:hover {
+  background: #2c2c2c;
+}
+
+.sfx-studio-lib-card.on {
+  border-color: rgba(80, 210, 220, 0.85);
+  background: #262626;
+}
+
+.sfx-studio-lib-card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sfx-studio-lib-card-name {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #efefef;
+}
+
+.sfx-studio-lib-card-meta {
+  font-size: 11px;
+  line-height: 1.2;
+  color: #757575;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfx-studio-lib-dot {
+  margin: 0 4px;
+  opacity: 0.55;
+}
+
+.sfx-studio-lib-card-acts {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  opacity: 0.72;
+}
+
+.sfx-studio-lib-card:hover .sfx-studio-lib-card-acts,
+.sfx-studio-lib-card.on .sfx-studio-lib-card-acts {
+  opacity: 1;
+}
+
+.sfx-studio-lib-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #9a9a9a;
+  cursor: pointer;
+}
+
+.sfx-studio-lib-icon-btn:hover {
+  color: #f2f2f2;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.sfx-studio-lib-icon-btn.on {
+  color: #e8c25a;
+}
+
+.sfx-studio-lib-player {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.sfx-studio-lib-play {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #efefef;
+  color: #141414;
+  cursor: pointer;
+}
+
+.sfx-studio-lib-play:hover {
+  background: #fff;
+}
+
+.sfx-studio-lib-player-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sfx-studio-lib-player-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: #e8e8e8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfx-studio-lib-player-src {
+  font-weight: 400;
+  color: #777;
+}
+
+.sfx-studio-lib-player-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sfx-studio-lib-time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #9a9a9a;
+  flex-shrink: 0;
+}
+
+.sfx-studio-lib-time.muted {
+  color: #5e5e5e;
+}
+
+.sfx-studio-lib-seek {
+  flex: 1;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.sfx-studio-lib-seek-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #e0e0e0;
+  min-width: 0;
+}
+
+.sfx-studio-lib-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: transparent;
+  color: #888;
+}
+
+.sfx-studio-lib-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ddd;
 }
 
 .sfx-studio-top {
@@ -4764,53 +5412,235 @@ html.is-resizing .darkveil-canvas {
   flex-shrink: 0;
   gap: 0;
   padding: 2px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+  background: #242424;
 }
 
 .sfx-studio-kind-btn {
   height: 28px;
-  padding: 0 12px;
+  padding: 0 14px;
   border: none;
-  border-radius: 4px;
+  border-radius: 999px;
   background: transparent;
-  color: #9a9a9a;
+  color: #8a8a8a;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 500;
   cursor: pointer;
   -webkit-app-region: no-drag;
 }
 
 .sfx-studio-kind-btn:hover {
-  color: #e8e8e8;
+  color: #d8d8d8;
 }
 
 .sfx-studio-kind-btn.on {
-  color: var(--accent);
-  background: rgba(255, 106, 0, 0.12);
+  color: #f2f2f2;
+  background: #333;
 }
 
+/* 搜索框：收藏筛选与输入一体（自定义下拉，不用系统 select） */
 .sfx-studio-top-search {
   position: relative;
   flex: 1;
-  min-width: 140px;
-  max-width: 560px;
+  min-width: 160px;
+  max-width: none;
+  display: flex;
+  align-items: stretch;
+  height: 34px;
+  border-radius: 999px;
+  background: #242424;
+  overflow: visible;
+}
+
+.sfx-studio-top-search.with-filter {
+  padding-left: 0;
+}
+
+.sfx-studio-search-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
 .sfx-studio-top-search .sfx-search,
 .sfx-studio-search {
   width: 100%;
-  height: 32px;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.05);
+  height: 34px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
   box-shadow: none;
+  padding-left: 34px;
+  padding-right: 14px;
+  color: #e8e8e8;
+  font-size: 12.5px;
+}
+
+.sfx-studio-top-search.with-filter .sfx-studio-search {
+  border-radius: 0 999px 999px 0;
+  padding-left: 30px;
+}
+
+.sfx-studio-search-ico {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #7a7a7a;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.sfx-studio-top-search.with-filter .sfx-studio-search-ico {
+  left: 10px;
+}
+
+/* 左侧筛选段 */
+.sfx-studio-search-seg {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  z-index: 5;
+}
+
+.sfx-studio-search-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  min-width: 72px;
+  margin: 0;
+  padding: 0 10px 0 14px;
+  border: none;
+  border-radius: 999px 0 0 999px;
+  background: transparent;
+  color: #e8e8e8;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.08);
+}
+
+.sfx-studio-search-seg-btn:hover,
+.sfx-studio-search-seg-btn.on {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.sfx-studio-search-seg-chev {
+  flex-shrink: 0;
+  color: #9a9a9a;
+  transition: transform 0.15s ease;
+}
+
+.sfx-studio-search-seg-chev.open {
+  transform: rotate(180deg);
+  color: #cfcfcf;
+}
+
+.sfx-studio-search-seg-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 120px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: color-mix(in srgb, var(--menu-bg, #1a1a1a) 96%, #000);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  z-index: 40;
+  -webkit-app-region: no-drag;
+}
+
+.sfx-studio-search-seg-opt {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #d8d8d8;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sfx-studio-search-seg-opt:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.sfx-studio-search-seg-opt.on {
+  color: var(--accent, #ff6a00);
+  background: color-mix(in srgb, var(--accent, #ff6a00) 14%, transparent);
+  font-weight: 650;
+}
+
+.sfx-studio-search::placeholder {
+  color: #666;
+}
+
+[data-theme="light"] .sfx-studio-top-search {
+  background: #f0f1f4;
+  box-shadow: inset 0 0 0 1px #e0e2e8;
+}
+
+[data-theme="light"] .sfx-studio-top-search .sfx-search,
+[data-theme="light"] .sfx-studio-search {
+  color: #111827;
+  background: transparent;
+}
+
+[data-theme="light"] .sfx-studio-search-ico {
+  color: #9ca3af;
+}
+
+[data-theme="light"] .sfx-studio-search-seg-btn {
+  color: #111827;
+  box-shadow: inset -1px 0 0 #dde0e6;
+}
+
+[data-theme="light"] .sfx-studio-search-seg-btn:hover,
+[data-theme="light"] .sfx-studio-search-seg-btn.on {
+  background: rgba(0, 0, 0, 0.04);
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-studio-search-seg-chev {
+  color: #6b7280;
+}
+
+[data-theme="light"] .sfx-studio-search-seg-menu {
+  border-color: #e5e7eb;
+  background: #ffffff;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+[data-theme="light"] .sfx-studio-search-seg-opt {
+  color: #374151;
+}
+
+[data-theme="light"] .sfx-studio-search-seg-opt:hover {
+  background: #f3f4f7;
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-studio-search-seg-opt.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, #fff);
 }
 
 .sfx-studio-search:focus {
-  border-color: rgba(255, 106, 0, 0.45);
   outline: none;
-  background: rgba(255, 255, 255, 0.07);
+  background: #2a2a2a;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 .sfx-studio-top-hits {
@@ -5003,6 +5833,8 @@ html.is-resizing .darkveil-canvas {
 .sfx-studio-card.edit {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .sfx-studio-card.search {
@@ -5115,14 +5947,34 @@ html.is-resizing .darkveil-canvas {
   line-height: 1.4;
 }
 
+.sfx-tl-keys {
+  display: none;
+}
+
 .sfx-tl-toolbar {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
   gap: 2px 6px;
-  min-height: 36px;
-  padding: 2px 4px 6px;
+  min-height: 38px;
+  padding: 4px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  background: #1a1a1a;
   -webkit-app-region: no-drag;
+}
+
+.sfx-studio-lower .sfx-tl {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sfx-studio-lower .sfx-tl-toolbar {
+  background: transparent;
+  border-bottom-color: rgba(255, 255, 255, 0.06);
 }
 
 .sfx-tl-tool-group {
@@ -5168,8 +6020,18 @@ html.is-resizing .darkveil-canvas {
   cursor: default;
 }
 
+.sfx-studio-lower .sfx-tl-tool.on {
+  color: #f0f0f0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sfx-studio-lower .sfx-tl-tool.on:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .sfx-tl-tool.on {
-  color: var(--accent); /* Herm?s orange */
+  color: var(--accent);
   background: transparent;
 }
 
@@ -5197,6 +6059,15 @@ html.is-resizing .darkveil-canvas {
   cursor: pointer;
 }
 
+.sfx-studio-lower .sfx-tl-ruler {
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sfx-studio-lower .sfx-tl-lanes {
+  background: transparent;
+}
+
 .sfx-tl {
   display: flex;
   min-height: 0;
@@ -5207,8 +6078,63 @@ html.is-resizing .darkveil-canvas {
   -webkit-app-region: no-drag;
 }
 
+/* 空格试听时时间线常聚焦，禁止系统焦点框（浅色=黑圈/深色=白圈） */
+.sfx-tl:focus,
+.sfx-tl:focus-visible,
+.sfx-tl-scroll:focus,
+.sfx-tl-scroll:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 .sfx-tl.blade {
   cursor: crosshair;
+}
+
+/* 深色：滚条槽与浮块底同色 #1c1c1c，避免空格一滚冒出白线 */
+.sfx-studio-lower .sfx-tl {
+  background: #1c1c1c;
+}
+
+.sfx-studio-lower .sfx-tl-scroll {
+  background: #1c1c1c;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a #1c1c1c;
+  color-scheme: dark;
+}
+
+.sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: #1c1c1c;
+}
+
+.sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-track {
+  background: #1c1c1c;
+}
+
+.sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border-radius: 4px;
+  border: 2px solid #1c1c1c;
+}
+
+.sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
+
+.sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-corner {
+  background: #1c1c1c;
+}
+
+.sfx-studio-lower .sfx-tl-inner {
+  background: #1c1c1c;
+}
+
+.sfx-studio-lower .sfx-tl-side {
+  width: 112px;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.18);
 }
 
 .sfx-tl-side {
@@ -5258,6 +6184,18 @@ html.is-resizing .darkveil-canvas {
   font-size: 12px;
   font-weight: 700;
   box-sizing: border-box;
+}
+
+.sfx-studio-lower .sfx-tl-track-label {
+  color: #9a9a9a;
+  background: transparent;
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+.sfx-studio-lower .sfx-tl-track-label.on {
+  color: #ececec;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 2px 0 0 #d8d8d8;
 }
 
 .sfx-tl-track-label.on {
@@ -5322,29 +6260,42 @@ html.is-resizing .darkveil-canvas {
 .sfx-tl-scroll {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
+  /* 不用 scrollbar-gutter：WebView 里会留一条深/浅异色边，空格滚屏时特别明显 */
 }
 
 .sfx-tl-inner {
   position: relative;
   min-width: 100%;
+  /* 内容少时也撑满可视高度，播放头才能贯穿到底 */
+  min-height: 100%;
+}
+
+.sfx-studio-lower .sfx-tl-lanes {
+  min-height: calc(100% - 30px);
 }
 
 .sfx-tl-inner > .sfx-tl-playhead {
   top: 0;
   bottom: 0;
+  height: auto;
 }
 
 .sfx-tl-snap-guide {
   position: absolute;
   top: 0;
   bottom: 0;
+  left: 0;
   width: 1px;
   margin-left: -0.5px;
   background: #fbbf24;
   box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.35);
   pointer-events: none;
   z-index: 28;
+  opacity: 0;
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
 }
 
 .sfx-tl-ruler {
@@ -5394,32 +6345,45 @@ html.is-resizing .darkveil-canvas {
   );
 }
 
+/* 剪映式播放头：顶上小标 + 竖线贯穿标尺与全部轨道 */
 .sfx-tl-playhead {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: #ef4444;
-  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.25);
+  width: 1px;
+  margin-left: -0.5px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: none;
   pointer-events: none;
-  z-index: 30;
+  z-index: 40;
   transform: translate3d(0, 0, 0);
   will-change: transform;
-  contain: layout style;
 }
 
-.sfx-tl-playhead::before {
-  content: "";
+.sfx-tl-playhead-head {
   position: absolute;
-  top: -6px;
-  left: -4px;
-  width: 0;
-  height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 7px solid #ef4444;
+  top: 2px;
+  left: 50%;
+  width: 11px;
+  height: 13px;
+  transform: translateX(-50%);
+  background: #fff;
+  /* 上圆下尖的小标（类似剪映） */
+  clip-path: polygon(
+    18% 0%,
+    82% 0%,
+    100% 22%,
+    100% 42%,
+    50% 100%,
+    0% 42%,
+    0% 22%
+  );
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.sfx-studio-lower .sfx-tl-playhead {
+  background: rgba(255, 255, 255, 0.95);
 }
 
 .sfx-tl-lane {
@@ -5466,6 +6430,18 @@ html.is-resizing .darkveil-canvas {
   overflow: hidden;
   user-select: none;
   touch-action: none;
+  /* 平移走合成层，避免拖时整轨 reflow */
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+}
+
+.sfx-tl-clip.dragging {
+  cursor: grabbing;
+  will-change: transform;
+  z-index: 24;
+  overflow: visible;
+  box-shadow: inset 0 0 0 1px #8a8a8a;
+  pointer-events: none; /* 拖时不挡命中，跟手更稳 */
 }
 
 .sfx-tl-clip:has(.sfx-tl-vol-tip),
@@ -6160,125 +7136,512 @@ html.is-resizing .darkveil-canvas {
     rgba(0, 0, 0, 0.35) 0px -1px 0px inset;
 }
 
-/* ????? / ??? ?? ????????? */
+/* —— 混剪浅色：提高对比，告别一片惨白灰 —— */
+[data-theme="light"] .sfx-studio {
+  background: #e6e8ec;
+  color: #1c1c1e;
+}
+
+[data-theme="light"] .sfx-studio-panel-title,
+[data-theme="light"] .sfx-tl-area-title {
+  color: #3a3a3c;
+}
+
+[data-theme="light"] .sfx-studio-upper {
+  border-bottom: none;
+}
+
+/* 三个浮块：白底 + 清晰边 + 轻阴影 */
+[data-theme="light"] .sfx-studio-lib,
+[data-theme="light"] .sfx-studio-inspector,
+[data-theme="light"] .sfx-studio-lower > .sfx-studio-card.edit {
+  background: #ffffff;
+  border-color: #d0d4dc;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 4px 16px rgba(20, 24, 36, 0.07);
+}
+
 [data-theme="light"] .sfx-studio-kind {
-  background: color-mix(in srgb, var(--border) 55%, transparent);
+  background: #eceef2;
 }
 
 [data-theme="light"] .sfx-studio-kind-btn {
-  color: var(--muted);
+  color: #6b7280;
 }
 
 [data-theme="light"] .sfx-studio-kind-btn:hover {
-  color: var(--text);
+  color: #1f2937;
 }
 
 [data-theme="light"] .sfx-studio-kind-btn.on {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, #fff);
+  color: #111827;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 [data-theme="light"] .sfx-studio-top-search .sfx-search,
 [data-theme="light"] .sfx-studio-search {
-  background: var(--bg-input);
-  border-color: var(--border);
-  color: var(--text);
+  background: transparent;
+  border: none;
+  color: #111827;
+  box-shadow: none;
+}
+
+[data-theme="light"] .sfx-studio-search::placeholder {
+  color: #9ca3af;
+}
+
+[data-theme="light"] .sfx-studio-top-search:focus-within {
+  background: #fff;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, #c5c9d2),
+    0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 [data-theme="light"] .sfx-studio-search:focus {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  outline: none;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+/* 素材卡片 */
+[data-theme="light"] .sfx-studio-lib-card {
+  background: #f3f4f7;
+  border-color: transparent;
+}
+
+[data-theme="light"] .sfx-studio-lib-card:hover {
+  background: #e9ebf0;
+}
+
+[data-theme="light"] .sfx-studio-lib-card.on {
+  border-color: color-mix(in srgb, var(--accent) 70%, #22d3ee);
+  background: #eef6ff;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+[data-theme="light"] .sfx-studio-lib-card-name {
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-studio-lib-card-meta {
+  color: #6b7280;
+}
+
+[data-theme="light"] .sfx-studio-lib-icon-btn {
+  color: #6b7280;
+}
+
+[data-theme="light"] .sfx-studio-lib-icon-btn:hover {
+  color: #111827;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="light"] .sfx-studio-lib-icon-btn.on {
+  color: #d97706;
+}
+
+[data-theme="light"] .sfx-studio-lib-empty {
+  color: #9ca3af;
+}
+
+[data-theme="light"] .sfx-studio-lib-player {
+  background: #f8f9fb;
+  border-top-color: #e5e7eb;
+}
+
+[data-theme="light"] .sfx-studio-lib-player-title {
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-studio-lib-player-src {
+  color: #6b7280;
+}
+
+[data-theme="light"] .sfx-studio-lib-time {
+  color: #4b5563;
+}
+
+[data-theme="light"] .sfx-studio-lib-time.muted {
+  color: #9ca3af;
+}
+
+[data-theme="light"] .sfx-studio-lib-seek {
+  background: #e5e7eb;
+}
+
+[data-theme="light"] .sfx-studio-lib-seek-fill {
+  background: var(--accent);
+}
+
+[data-theme="light"] .sfx-studio-lib-play {
+  background: #1f2937;
+  color: #fff;
+}
+
+[data-theme="light"] .sfx-studio-lib-close {
+  color: #6b7280;
+  background: transparent;
+}
+
+[data-theme="light"] .sfx-studio-lib-close:hover {
+  color: #111;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* 声音设置 */
+[data-theme="light"] .sfx-insp-tabs {
+  border-bottom-color: #e5e7eb;
+}
+
+[data-theme="light"] .sfx-insp-tab {
+  color: #9ca3af;
+}
+
+[data-theme="light"] .sfx-insp-tab:hover {
+  color: #4b5563;
+}
+
+[data-theme="light"] .sfx-insp-tab.on {
+  color: #111827;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+[data-theme="light"] .sfx-insp-empty {
+  color: #9ca3af;
+}
+
+[data-theme="light"] .sfx-insp-clip-name {
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-insp-preview-btn {
+  background: #eef0f4;
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-insp-preview-btn:hover:not(:disabled) {
+  background: #e2e5eb;
+}
+
+[data-theme="light"] .sfx-insp-field-top span {
+  color: #4b5563;
+}
+
+[data-theme="light"] .sfx-insp-field-top em {
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-insp-field input[type="range"] {
+  accent-color: var(--accent);
+}
+
+[data-theme="light"] .sfx-insp-chip {
+  border-color: #e5e7eb;
+  background: #f3f4f7;
+  color: #374151;
+}
+
+[data-theme="light"] .sfx-insp-chip:hover {
+  border-color: #d1d5db;
+  background: #e9ebf0;
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-insp-chip.on {
+  border-color: color-mix(in srgb, var(--accent) 45%, #d1d5db);
+  background: color-mix(in srgb, var(--accent) 12%, #fff);
+  color: color-mix(in srgb, var(--accent) 85%, #111);
+}
+
+/* 混剪工具条 / 时间线 */
+[data-theme="light"] .sfx-tl-toolbar {
+  background: #f8f9fb;
+  border-bottom-color: #e5e7eb;
 }
 
 [data-theme="light"] .sfx-studio-top-actions .sfx-tl-tool,
 [data-theme="light"] .sfx-tl-tool {
-  color: var(--icon);
+  color: #4b5563;
 }
 
 [data-theme="light"] .sfx-tl-tool:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: #e9ebf0;
+  color: #111827;
 }
 
-[data-theme="light"] .sfx-tl-tool.on {
+[data-theme="light"] .sfx-tl-tool.on,
+[data-theme="light"] .sfx-studio-lower .sfx-tl-tool.on {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, #fff);
 }
 
-[data-theme="light"] .sfx-tl-tool.on:hover:not(:disabled) {
+[data-theme="light"] .sfx-tl-tool.on:hover:not(:disabled),
+[data-theme="light"] .sfx-studio-lower .sfx-tl-tool.on:hover:not(:disabled) {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, #fff);
 }
 
 [data-theme="light"] .sfx-tl-timecode {
-  color: var(--text);
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-tl-sep {
+  background: #e5e7eb;
 }
 
 [data-theme="light"] .sfx-tl-zoom {
   accent-color: var(--accent);
 }
 
-[data-theme="light"] .sfx-tl {
-  background: var(--bg-elev);
-  border-color: var(--border-strong);
+[data-theme="light"] .sfx-studio-lower > .sfx-studio-card.edit {
+  /* 盖掉深色默认的 inset/大阴影，避免底边偶发一条黑线 */
+  border-color: #d0d4dc !important;
+  background: #ffffff !important;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 4px 16px rgba(20, 24, 36, 0.06) !important;
+  /* 避免空格试听自动滚屏时露出深色底板 */
+  color-scheme: light;
 }
 
+[data-theme="light"] .sfx-studio-lower .sfx-tl,
+[data-theme="light"] .sfx-tl {
+  background: #ffffff !important;
+  border: none !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  color-scheme: light;
+}
+
+/* 浅色：滚条槽与白底同色，空格横滚时不会冒黑边 */
+[data-theme="light"] .sfx-studio-lower .sfx-tl-scroll,
+[data-theme="light"] .sfx-tl-scroll {
+  background: #ffffff !important;
+  color-scheme: light;
+  scrollbar-width: thin;
+  scrollbar-color: #d0d4dc #ffffff;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar,
+[data-theme="light"] .sfx-tl-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: #ffffff;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-thumb,
+[data-theme="light"] .sfx-tl-scroll::-webkit-scrollbar-thumb {
+  background: #d0d4dc;
+  border-radius: 4px;
+  border: 2px solid #ffffff;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-thumb:hover,
+[data-theme="light"] .sfx-tl-scroll::-webkit-scrollbar-thumb:hover {
+  background: #b8bcc6;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-track,
+[data-theme="light"] .sfx-tl-scroll::-webkit-scrollbar-track {
+  background: #ffffff;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-scroll::-webkit-scrollbar-corner,
+[data-theme="light"] .sfx-tl-scroll::-webkit-scrollbar-corner {
+  background: #ffffff;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-inner {
+  background: #ffffff !important;
+  min-height: 100%;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-side,
 [data-theme="light"] .sfx-tl-side {
-  background: var(--bg-panel);
+  /* 盖掉深色 rgba(0,0,0,0.18) 默认 */
+  background: #f3f4f7 !important;
+  border-right: 1px solid #e5e7eb !important;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-toolbar {
+  background: #f8f9fb !important;
+  border-bottom: 1px solid #e5e7eb !important;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-ruler,
+[data-theme="light"] .sfx-tl-ruler {
+  background: #fafbfc !important;
+  border-bottom: 1px solid #e5e7eb !important;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-lanes,
+[data-theme="light"] .sfx-tl-lanes {
+  background: #ffffff !important;
 }
 
 [data-theme="light"] .sfx-tl-add-track {
-  color: var(--icon);
+  color: #6b7280;
+  border-top-color: #e5e7eb;
 }
 
 [data-theme="light"] .sfx-tl-add-track:hover {
-  background: var(--bg-hover);
-  color: var(--text);
+  background: #e9ebf0;
+  color: var(--accent);
 }
 
+[data-theme="light"] .sfx-studio-lower .sfx-tl-track-label,
 [data-theme="light"] .sfx-tl-track-label {
-  color: var(--soft);
+  color: #4b5563;
+  border-bottom-color: #e5e7eb;
+  background: transparent;
 }
 
+[data-theme="light"] .sfx-studio-lower .sfx-tl-track-label.on,
 [data-theme="light"] .sfx-tl-track-label.on {
-  color: color-mix(in srgb, var(--accent) 75%, #1a1a1a);
-  background: color-mix(in srgb, var(--accent) 12%, #fff);
-  box-shadow: inset 3px 0 0 var(--accent);
+  color: #111827;
+  background: #e9ebf0;
+  /* 不要深色/强调色竖条，浅色下容易看成「黑边」 */
+  box-shadow: none;
+  border-left: 2px solid #c5c9d2;
 }
 
 [data-theme="light"] .sfx-tl-track-mute {
-  color: var(--icon);
+  color: #6b7280;
 }
 
+[data-theme="light"] .sfx-tl-track-mute:hover {
+  background: #e9ebf0;
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-ruler,
 [data-theme="light"] .sfx-tl-ruler {
-  background: var(--bg-panel);
+  background: #fafbfc;
+  border-bottom-color: #e5e7eb;
 }
 
 [data-theme="light"] .sfx-tl-mark {
-  color: var(--muted);
+  color: #6b7280;
 }
 
 [data-theme="light"] .sfx-tl-tick {
-  background: var(--border-strong);
+  background: #c5cad3;
 }
 
+[data-theme="light"] .sfx-studio-lower .sfx-tl-lanes,
 [data-theme="light"] .sfx-tl-lanes {
   background: repeating-linear-gradient(
     90deg,
-    transparent,
-    transparent 47px,
-    color-mix(in srgb, var(--border-strong) 55%, transparent) 47px,
-    color-mix(in srgb, var(--border-strong) 55%, transparent) 48px
+    #ffffff,
+    #ffffff 47px,
+    #eef0f4 47px,
+    #eef0f4 48px
   );
 }
 
+[data-theme="light"] .sfx-tl-lane {
+  border-bottom-color: #eef0f4;
+}
+
+/* 浅色：不要蓝虚线描边，只轻微底色区分 */
 [data-theme="light"] .sfx-tl-lane.on {
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  outline-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: rgba(0, 0, 0, 0.03);
+  outline: none;
+}
+
+/* 播放头：浅底上用强调色，避免白线看不见 */
+[data-theme="light"] .sfx-tl-playhead {
+  background: var(--accent);
+}
+
+[data-theme="light"] .sfx-tl-playhead-head {
+  background: var(--accent);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 40%, rgba(0, 0, 0, 0.2));
+}
+
+[data-theme="light"] .sfx-studio-lower .sfx-tl-playhead {
+  background: var(--accent);
+}
+
+/* 浅色音轨块：中性浅灰，无蓝边 */
+[data-theme="light"] .sfx-tl-clip {
+  background: linear-gradient(180deg, #f0f1f4 0%, #e4e6eb 100%);
+  color: #1a1a1a;
+  box-shadow:
+    inset 0 0 0 1px #d0d3d9,
+    0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+[data-theme="light"] .sfx-tl-clip.on {
+  background: linear-gradient(180deg, #ebecef 0%, #dddfe5 100%);
+  box-shadow:
+    inset 0 0 0 1px #c4c7ce,
+    0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="light"] .sfx-tl-clip.dragging {
+  box-shadow:
+    inset 0 0 0 1px #b8bcc4,
+    0 3px 10px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="light"] .sfx-tl-wave path {
+  stroke: #5c6370;
+  opacity: 0.85;
+}
+
+[data-theme="light"] .sfx-tl-clip-name {
+  color: #1a1a1a;
+  text-shadow: none;
+  font-weight: 650;
+}
+
+[data-theme="light"] .sfx-tl-vol-line {
+  background: #3a3a3a;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+}
+
+[data-theme="light"] .sfx-tl-fade polygon {
+  fill: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .sfx-tl-fade-edge {
+  stroke: #6b7280;
+}
+
+[data-theme="light"] .sfx-tl-clip-x {
+  color: #6b7280;
+}
+
+[data-theme="light"] .sfx-tl-clip-x:hover {
+  color: #1a1a1a;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+[data-theme="light"] .sfx-tl-handle.left,
+[data-theme="light"] .sfx-tl-handle.right {
+  /* 浅色块上修剪边更易辨认 */
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, #fff 55%, transparent),
+    transparent
+  );
+}
+
+[data-theme="light"] .sfx-tl-handle.right {
+  background: linear-gradient(
+    270deg,
+    color-mix(in srgb, #fff 55%, transparent),
+    transparent
+  );
 }
 
 [data-theme="light"] .sfx-studio-card {
-  background: var(--bg-elev);
-  border-color: var(--border);
+  background: #ffffff;
+  border-color: #d0d4dc;
 }
 
 [data-theme="light"] .sfx-vk {

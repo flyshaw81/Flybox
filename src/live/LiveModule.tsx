@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { AppWindow, LogIn, RefreshCw } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { ModuleChrome } from "../App";
@@ -25,6 +26,8 @@ import {
   type HistorySyncResult,
   type PortraitSyncResult,
 } from "./historySync";
+import { buildSessionReportText } from "./insights";
+import { closeLocalSessionWithHistory } from "./sessionMerge";
 import type {
   LiveGoals,
   LiveProfile,
@@ -113,6 +116,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
   const [historySyncing, setHistorySyncing] = useState(false);
   /** 扫码登录成功后，第一次抓历史/数据时的全屏飞车 loading */
   const [fetchAfterLogin, setFetchAfterLogin] = useState(false);
+  const [postEndNotice, setPostEndNotice] = useState<string | null>(null);
+  const [autoCopyReport, setAutoCopyReport] = useState(false);
   const dataRef = useRef(data);
   dataRef.current = data;
   const scrapeLock = useRef(false);
@@ -255,6 +260,70 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
     return data.sessions.find((s) => s.id === data.activeSessionId) ?? null;
   }, [data.activeSessionId, data.sessions]);
 
+  /** 下播：定稿 → 同步历史合并 → 复制小报 → 打开详情 */
+  const closeSessionPipeline = useCallback(
+    async (active: LiveSession) => {
+      const done = finalizeSession(active);
+      let cur = dataRef.current;
+      let sessions = upsertSession(cur.sessions, done);
+      await persist({ ...cur, loggedIn: true, sessions, activeSessionId: null });
+
+      let openId = done.id;
+      let noticeParts: string[] = [t("livePostEndSyncing")];
+      setPostEndNotice(noticeParts.join(" · "));
+      setSection("analysis");
+      setView("detail");
+      setDetailId(openId);
+
+      try {
+        if (!historySyncLock.current && dataRef.current.loggedIn && !needRelogin) {
+          historySyncLock.current = true;
+          setHistorySyncing(true);
+          try {
+            const raw = await invoke<HistorySyncResult>("live_sync_history");
+            const remote = Array.isArray(raw?.sessions) ? raw.sessions : [];
+            cur = dataRef.current;
+            sessions = mergeHistorySessions(cur.sessions, remote);
+            const closed = closeLocalSessionWithHistory(sessions, done);
+            sessions = closed.sessions;
+            openId = closed.detailId;
+            await persist({
+              ...cur,
+              loggedIn: true,
+              sessions,
+              activeSessionId: null,
+              lastHistorySyncAt: Math.floor(Date.now() / 1000),
+            });
+            setDetailId(openId);
+            if (openId !== done.id) noticeParts = [t("livePostEndMerged")];
+            // 画像/深采交给详情页缺口补采 effect，避免此处循环依赖
+          } finally {
+            historySyncLock.current = false;
+            setHistorySyncing(false);
+          }
+        }
+      } catch {
+        /* 合并失败仍保留本场详情 */
+      }
+
+      try {
+        const list = dataRef.current.sessions;
+        const target = list.find((x) => x.id === openId) ?? done;
+        const text = buildSessionReportText(target, list);
+        await writeText(text);
+        noticeParts = noticeParts.filter((p) => p !== t("livePostEndSyncing"));
+        noticeParts.push(t("livePostEndCopied"));
+        setPostEndNotice(noticeParts.join(" · "));
+        setAutoCopyReport(true);
+      } catch {
+        noticeParts = noticeParts.filter((p) => p !== t("livePostEndSyncing"));
+        setPostEndNotice(noticeParts.join(" · ") || null);
+      }
+      window.setTimeout(() => setPostEndNotice(null), 6000);
+    },
+    [needRelogin, persist, t],
+  );
+
   const applyScrape = useCallback(
     async (raw: LiveScrapeResult) => {
       if (raw.needLogin) {
@@ -322,15 +391,10 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       }
 
       if (status === "ended" && active && active.endTime == null) {
-        const done = finalizeSession(active);
-        sessions = upsertSession(sessions, done);
-        await persist({ ...cur, loggedIn: true, sessions, activeSessionId: null });
-        setDetailId(done.id);
-        setSection("analysis");
-        setView("detail");
+        await closeSessionPipeline(active);
       }
     },
-    [persist],
+    [closeSessionPipeline, persist],
   );
 
   const runDeepSync = useCallback(
@@ -639,13 +703,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
       setView("overview");
       return;
     }
-    const done = finalizeSession(active);
-    const sessions = upsertSession(cur.sessions, done);
-    await persist({ ...cur, sessions, activeSessionId: null });
-    setDetailId(done.id);
-    setSection("analysis");
-    setView("detail");
-  }, [persist]);
+    await closeSessionPipeline(active);
+  }, [closeSessionPipeline]);
 
   const detailSession = detailId
     ? data.sessions.find((s) => s.id === detailId) ?? null
@@ -835,10 +894,16 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
   return (
     <div className="live-shell" ref={shellRef}>
       {error ? <div className="banner error">{error}</div> : null}
+      {postEndNotice ? (
+        <div className="banner live-post-end-banner" role="status">
+          {postEndNotice}
+        </div>
+      ) : null}
       {section === "live" ? (
         <LiveBoard
           session={activeSession}
           allSessions={data.sessions}
+          goals={data.goals}
           cueNoteId={data.cueNoteId ?? null}
           onCueNoteId={saveCueNoteId}
           onEndLive={() => void endLiveManual()}
@@ -888,6 +953,8 @@ export default function LiveModule({ embedded, onChromeChange }: Props) {
           session={detailSession}
           allSessions={data.sessions}
           prev={prevSession}
+          autoCopyReport={autoCopyReport}
+          onAutoCopyDone={() => setAutoCopyReport(false)}
           labels={{
             back: t("liveBackList"),
             core: t("liveCoreMetrics"),

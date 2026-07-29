@@ -168,8 +168,55 @@ export default function LiveOverview({
     setAvatarBroken(false);
   }, [avatarSrc]);
 
+  const decisionLine =
+    advice?.text ||
+    topInsights.find((l) => l.kind === "risk" || l.kind === "tip")?.text ||
+    topInsights[0]?.text ||
+    null;
+
   return (
     <div className="live-overview">
+      {decisionLine || advice?.shortVsNormalText ? (
+        <div className="live-decision-strip" aria-label={labels.slotAdvice}>
+          <div className="live-decision-card">
+            <div className="live-decision-title">{labels.slotAdvice}</div>
+            {decisionLine ? (
+              <p className="live-decision-body">{decisionLine}</p>
+            ) : null}
+            {advice?.shortVsNormalText ? (
+              <p className="live-decision-body muted">{advice.shortVsNormalText}</p>
+            ) : null}
+          </div>
+          {(progress.dailyGifts ||
+            progress.weeklyFollowers ||
+            progress.weeklyDuration) &&
+          onGoalsChange ? (
+            <div className="live-decision-card">
+              <div className="live-decision-title">{labels.goalsTitle}</div>
+              {progress.dailyGifts ? (
+                <p className="live-decision-body">
+                  {labels.goalDailyGifts}{" "}
+                  {fmt(progress.dailyGifts.current)}/{fmt(progress.dailyGifts.target)}
+                </p>
+              ) : null}
+              {progress.weeklyFollowers ? (
+                <p className="live-decision-body">
+                  {labels.goalWeeklyFans}{" "}
+                  {fmt(progress.weeklyFollowers.current)}/
+                  {fmt(progress.weeklyFollowers.target)}
+                </p>
+              ) : null}
+              {progress.weeklyDuration ? (
+                <p className="live-decision-body">
+                  {labels.goalWeeklyDur}{" "}
+                  {fmtDur(progress.weeklyDuration.current)} /{" "}
+                  {fmtDur(progress.weeklyDuration.target)}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="live-anchor-card">
         <aside className="live-anchor-aside">
           {showAvatar ? (

@@ -4,11 +4,12 @@ import type { Note } from "../Notepad";
 import SfxMenuSelect from "../SfxMenuSelect";
 import LiveMiniPlayer from "./LiveMiniPlayer";
 import LiveMonitor from "./LiveMonitor";
-import type { LiveSession } from "./liveTypes";
+import type { LiveGoals, LiveSession } from "./liveTypes";
 
 type Props = {
   session: LiveSession | null;
   allSessions: LiveSession[];
+  goals?: LiveGoals;
   cueNoteId: string | null;
   onCueNoteId: (id: string | null) => void;
   onEndLive: () => void;
@@ -56,6 +57,7 @@ type Props = {
 export default function LiveBoard({
   session,
   allSessions,
+  goals,
   cueNoteId,
   onCueNoteId,
   onEndLive,
@@ -100,6 +102,7 @@ export default function LiveBoard({
           <LiveMonitor
             session={session}
             allSessions={allSessions}
+            goals={goals}
             labels={{
               live: labels.live,
               idle: labels.idle,

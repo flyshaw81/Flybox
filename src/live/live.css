@@ -1,4 +1,64 @@
 /* LIVE / analysis styles (split from App.css) */
+
+.live-post-end-banner {
+  background: color-mix(in srgb, var(--accent, #3cb371) 16%, transparent) !important;
+  color: var(--text, inherit);
+  border-color: transparent;
+}
+
+.live-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+.live-alert {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  background: color-mix(in srgb, var(--accent, #4a90d9) 14%, transparent);
+  color: var(--text, inherit);
+}
+.live-alert-warn {
+  background: color-mix(in srgb, #e07a3d 20%, transparent);
+}
+
+.live-decision-strip {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+@media (max-width: 900px) {
+  .live-decision-strip {
+    grid-template-columns: 1fr;
+  }
+}
+.live-decision-card {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent, #3cb371) 10%, var(--panel, transparent));
+  border: 1px solid color-mix(in srgb, var(--border, #333) 80%, transparent);
+}
+.live-decision-title {
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.75;
+  margin-bottom: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.live-decision-body {
+  font-size: 13.5px;
+  line-height: 1.45;
+  margin: 0;
+}
+.live-decision-body + .live-decision-body {
+  margin-top: 6px;
+  opacity: 0.85;
+}
+
 .live-chrome-tabs {
   display: flex;
   align-items: center;

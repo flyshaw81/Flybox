@@ -139,6 +139,16 @@ description = "Allow playing a one-shot sound effect"
 commands.allow = ["sfx_play"]
 
 [[permission]]
+identifier = "allow-sfx-test-tone"
+description = "Allow playing a short test tone on the current output device"
+commands.allow = ["sfx_test_tone"]
+
+[[permission]]
+identifier = "allow-sfx-render-clip-fx"
+description = "Allow rendering a clip with speed/pitch/fade for audition"
+commands.allow = ["sfx_render_clip_fx"]
+
+[[permission]]
 identifier = "allow-sfx-play-bgm"
 description = "Allow playing a looping BGM track"
 commands.allow = ["sfx_play_bgm"]

@@ -46,6 +46,8 @@ mod engine {
             fade_ms: u64,
             fade_out_ms: u64,
             pitch: f32,
+            /// Playback speed (1.0 = normal). Uses BASS tempo when ≠ 1.
+            speed: f32,
             range_start_ms: Option<u64>,
             range_end_ms: Option<u64>,
             /// Optional id so UI can live-adjust this voice (montage clip id).
@@ -262,19 +264,20 @@ mod engine {
             bass_ffi::free();
         }
 
-        fn open_sfx_stream(path: &Path, pitch: f32) -> Result<HSTREAM, String> {
-            let h = if pitch.abs() > 0.01 {
-                match bass_ffi::create_decode_stream(path, false) {
-                    Ok(dec) => bass_ffi::tempo_create(dec)
-                        .or_else(|_| bass_ffi::create_stream(path, false))?,
-                    Err(_) => bass_ffi::create_stream(path, false)?,
-                }
-            } else {
-                bass_ffi::create_stream(path, false)?
-            };
-            if pitch.abs() > 0.01 {
-                bass_ffi::set_pitch_semitones(h, pitch);
+        fn open_sfx_stream(path: &Path, pitch: f32, speed: f32) -> Result<HSTREAM, String> {
+            let speed = speed.clamp(0.25, 4.0);
+            let need_tempo = pitch.abs() > 0.01 || (speed - 1.0).abs() > 0.01;
+            if !need_tempo {
+                return bass_ffi::create_stream(path, false);
             }
+            // 变调/变速必须走 tempo 流；禁止静默回退到普通流（否则听起来「完全无效」）
+            let dec = bass_ffi::create_decode_stream(path, false)
+                .map_err(|e| format!("变调/变速解码失败：{e}"))?;
+            let h = bass_ffi::tempo_create(dec)
+                .map_err(|e| format!("变调/变速不可用（检查 bass_fx.dll）：{e}"))?;
+            let tempo = (speed - 1.0) * 100.0;
+            bass_ffi::set_tempo_percent(h, tempo);
+            bass_ffi::set_pitch_semitones(h, pitch);
             Ok(h)
         }
 
@@ -285,6 +288,7 @@ mod engine {
             fade_ms: u64,
             fade_out_ms: u64,
             pitch: f32,
+            speed: f32,
             range_start_ms: Option<u64>,
             range_end_ms: Option<u64>,
             tag: Option<String>,
@@ -296,7 +300,7 @@ mod engine {
                     bass_ffi::stop(s.handle);
                 }
             }
-            let h = Self::open_sfx_stream(Path::new(path), pitch)
+            let h = Self::open_sfx_stream(Path::new(path), pitch, speed)
                 .map_err(|e| format!("无法播放（可尝试转码）：{e}"))?;
             let item_volume = volume.clamp(0.0, 4.0);
             let vol = self.gain_sfx(item_volume);
@@ -760,6 +764,7 @@ mod engine {
                                 fade_ms,
                                 fade_out_ms,
                                 pitch,
+                                speed,
                                 range_start_ms,
                                 range_end_ms,
                                 tag,
@@ -771,6 +776,7 @@ mod engine {
                                     fade_ms,
                                     fade_out_ms,
                                     pitch,
+                                    speed,
                                     range_start_ms,
                                     range_end_ms,
                                     tag,
@@ -1097,6 +1103,7 @@ pub fn sfx_play(
     fade_ms: Option<u64>,
     fade_out_ms: Option<u64>,
     pitch: Option<f32>,
+    speed: Option<f32>,
     range_start_ms: Option<u64>,
     range_end_ms: Option<u64>,
     tag: Option<String>,
@@ -1111,6 +1118,7 @@ pub fn sfx_play(
         fade_ms: fade_ms.unwrap_or(40),
         fade_out_ms: fade_out_ms.unwrap_or(0),
         pitch: pitch.unwrap_or(0.0),
+        speed: speed.unwrap_or(1.0).clamp(0.25, 4.0),
         range_start_ms,
         range_end_ms,
         tag,
@@ -1118,6 +1126,99 @@ pub fn sfx_play(
     })?;
     rx.recv_timeout(Duration::from_millis(2500))
         .map_err(|_| "播放超时".to_string())?
+}
+
+/// 试听输出：后端写临时 WAV 再播，不依赖前端 fs 写权限
+fn make_beep_wav(duration_sec: f32, freq: f32, sample_rate: u32) -> Vec<u8> {
+    let n = (sample_rate as f32 * duration_sec).floor() as usize;
+    let data_size = n * 2;
+    let mut buf = vec![0u8; 44 + data_size];
+    buf[0..4].copy_from_slice(b"RIFF");
+    buf[4..8].copy_from_slice(&(36 + data_size as u32).to_le_bytes());
+    buf[8..12].copy_from_slice(b"WAVE");
+    buf[12..16].copy_from_slice(b"fmt ");
+    buf[16..20].copy_from_slice(&16u32.to_le_bytes());
+    buf[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
+    buf[22..24].copy_from_slice(&1u16.to_le_bytes()); // mono
+    buf[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+    buf[28..32].copy_from_slice(&(sample_rate * 2).to_le_bytes());
+    buf[32..34].copy_from_slice(&2u16.to_le_bytes());
+    buf[34..36].copy_from_slice(&16u16.to_le_bytes());
+    buf[36..40].copy_from_slice(b"data");
+    buf[40..44].copy_from_slice(&(data_size as u32).to_le_bytes());
+    for i in 0..n {
+        let t = i as f32 / sample_rate as f32;
+        let attack = (i as f32 / (sample_rate as f32 * 0.012)).min(1.0);
+        let release = ((n - i) as f32 / (sample_rate as f32 * 0.05)).min(1.0);
+        let env = attack * release;
+        let sample = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.38 * env;
+        let s = (sample * 32767.0).round() as i16;
+        let o = 44 + i * 2;
+        buf[o..o + 2].copy_from_slice(&s.to_le_bytes());
+    }
+    buf
+}
+
+#[tauri::command]
+pub fn sfx_test_tone(
+    state: tauri::State<'_, SfxState>,
+    volume: Option<f32>,
+) -> Result<(), String> {
+    let path = std::env::temp_dir().join("flybox-test-beep.wav");
+    let wav = make_beep_wav(0.32, 880.0, 44100);
+    std::fs::write(&path, &wav).map_err(|e| format!("写入测试音失败：{e}"))?;
+    let path_str = path.to_string_lossy().to_string();
+    sfx_play(
+        state,
+        path_str,
+        volume.unwrap_or(0.75).clamp(0.0, 1.5),
+        Some(10),
+        None,
+        Some(0.0),
+        Some(1.0),
+        None,
+        None,
+        None,
+    )
+}
+
+/// 按当前参数（裁剪/音量/淡化/变速/变调）渲染一段临时 WAV，再普通播放。
+/// 与导出同一套 ffmpeg 链路，避免 BASS tempo「改一次就锁死」的体验问题。
+#[tauri::command]
+pub fn sfx_render_clip_fx(
+    path: String,
+    start_ms: u64,
+    end_ms: u64,
+    fade_in_ms: Option<u64>,
+    fade_out_ms: Option<u64>,
+    volume: Option<f32>,
+    speed: Option<f32>,
+    pitch: Option<f32>,
+) -> Result<String, String> {
+    let src = PathBuf::from(&path);
+    if !src.is_file() {
+        return Err(format!("文件不存在：{path}"));
+    }
+    if end_ms <= start_ms + 20 {
+        return Err("裁剪区间太短".into());
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = std::env::temp_dir().join(format!("flybox_fx_{ts}.wav"));
+    ffmpeg_util::export_range_fx(
+        &src,
+        start_ms,
+        end_ms,
+        &dest,
+        fade_in_ms.unwrap_or(0).min(30_000),
+        fade_out_ms.unwrap_or(0).min(30_000),
+        volume.unwrap_or(1.0).clamp(0.0, 8.0),
+        speed.unwrap_or(1.0).clamp(0.25, 4.0),
+        pitch.unwrap_or(0.0).clamp(-12.0, 12.0),
+    )?;
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -1584,6 +1685,10 @@ pub struct MontageClipIn {
     pub fade_out_ms: Option<u64>,
     /// Linear gain (1.0 = 0dB). Optional for older callers.
     pub volume: Option<f32>,
+    /// Playback speed (1.0 = normal). Optional.
+    pub speed: Option<f32>,
+    /// Pitch shift in semitones. Optional.
+    pub pitch: Option<f32>,
 }
 
 /// Cut each clip, place on a shared timeline (adelay), then amix to one WAV.
@@ -1645,7 +1750,7 @@ pub fn sfx_export_montage(
                 return Err(format!("第 {} 段裁剪区间太短", i + 1));
             }
             let part = tmp_dir.join(format!("part_{i:02}.wav"));
-            ffmpeg_util::export_range(
+            ffmpeg_util::export_range_fx(
                 &src,
                 c.start_ms,
                 c.end_ms,
@@ -1653,6 +1758,8 @@ pub fn sfx_export_montage(
                 c.fade_in_ms.unwrap_or(0).min(30_000),
                 c.fade_out_ms.unwrap_or(0).min(30_000),
                 c.volume.unwrap_or(1.0).clamp(0.0, 8.0),
+                c.speed.unwrap_or(1.0).clamp(0.25, 4.0),
+                c.pitch.unwrap_or(0.0).clamp(-12.0, 12.0),
             )?;
             parts.push((part, c.timeline_ms.min(3_600_000)));
         }

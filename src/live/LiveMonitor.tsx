@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import type { LiveSession } from "./liveTypes";
+import type { LiveGoals, LiveSession } from "./liveTypes";
+import { evaluateLiveAlerts } from "./liveAlerts";
 
 function fmt(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
@@ -41,6 +42,7 @@ type ConvMode = "minute" | "total";
 type Props = {
   session: LiveSession | null;
   allSessions: LiveSession[];
+  goals?: LiveGoals;
   labels: {
     live: string;
     idle: string;
@@ -71,8 +73,20 @@ type Props = {
   onEnd: () => void;
 };
 
-export default function LiveMonitor({ session, allSessions, labels, onEnd }: Props) {
+export default function LiveMonitor({
+  session,
+  allSessions,
+  goals,
+  labels,
+  onEnd,
+}: Props) {
   const [mode, setMode] = useState<ConvMode>("minute");
+  const alerts = useMemo(
+    () => evaluateLiveAlerts(session, goals, allSessions),
+    // dataPoints length drives recompute while live
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session, goals, allSessions, session?.dataPoints.length, session?.totalGifts],
+  );
 
   const elapsed = session
     ? session.endTime != null
@@ -208,6 +222,21 @@ export default function LiveMonitor({ session, allSessions, labels, onEnd }: Pro
           </button>
         ) : null}
       </div>
+
+      {alerts.length > 0 ? (
+        <div className="live-alerts" role="status">
+          {alerts.map((a) => (
+            <div
+              key={a.id}
+              className={
+                a.level === "warn" ? "live-alert live-alert-warn" : "live-alert"
+              }
+            >
+              {a.text}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="live-mon-grid">
         <section className="live-mon-conv">

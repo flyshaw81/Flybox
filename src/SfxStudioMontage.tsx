@@ -27,6 +27,10 @@ import {
   Magnet,
   Download,
   FolderOpen,
+  Star,
+  X,
+  Search,
+  ChevronDown,
 } from "lucide-react";
 import ContextMenu, { openCtxMenu, type CtxMenuState } from "./ContextMenu";
 import SfxVolumeButton from "./SfxVolumeButton";
@@ -56,9 +60,23 @@ type TlClip = {
   fadeOutMs: number;
   /** Clip gain in dB (0 = unity). CapCut-style volume rubber band. */
   gainDb: number;
+  /** 变速：1 = 原速 */
+  speed: number;
+  /** 变调：半音，0 = 原调 */
+  pitchSemitones: number;
 };
 
+type InspectorTab = "basic" | "voice" | "fx" | "speed";
+
 type EditMode = "selection" | "blade";
+
+const VOICE_PRESETS: { id: string; pitch: number }[] = [
+  { id: "none", pitch: 0 },
+  { id: "low", pitch: -4 },
+  { id: "deep", pitch: -7 },
+  { id: "bright", pitch: 4 },
+  { id: "chip", pitch: 7 },
+];
 
 type DragKind = "move" | "trim-left" | "trim-right";
 
@@ -104,6 +122,36 @@ const LIB_MIME = "application/x-flyphoto-sfx";
 
 function clampGainDb(db: number): number {
   return Math.max(VOL_MIN_DB, Math.min(VOL_MAX_DB, db));
+}
+
+/** CapCut-style mm:ss for library cards / mini player */
+function formatLibMs(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+}
+
+/** 正在打字时不抢快捷键；点时间线后焦点离开输入框即可用 */
+function isTypingTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "INPUT") {
+    const type = ((el as HTMLInputElement).type || "text").toLowerCase();
+    return ![
+      "button",
+      "checkbox",
+      "radio",
+      "range",
+      "file",
+      "submit",
+      "reset",
+      "color",
+    ].includes(type);
+  }
+  return false;
 }
 
 function dbToLinear(db: number): number {
@@ -246,8 +294,14 @@ function defaultTracks(t: TFn): Track[] {
   return [{ id: "tr1", name: `${t("sfxStudioTrack")} 1`, muted: false }];
 }
 
-function clipDurationMs(c: { srcStartMs: number; srcEndMs: number }): number {
-  return Math.max(0, c.srcEndMs - c.srcStartMs);
+function clipDurationMs(c: {
+  srcStartMs: number;
+  srcEndMs: number;
+  speed?: number;
+}): number {
+  const raw = Math.max(0, c.srcEndMs - c.srcStartMs);
+  const speed = Math.max(0.25, Math.min(4, c.speed ?? 1));
+  return Math.max(0, Math.round(raw / speed));
 }
 
 export type StudioDropTarget = { trackId: string; atMs: number };
@@ -265,6 +319,7 @@ export type StudioIncoming = {
 
 function ClipWaveform({
   path,
+  mediaMs,
   srcStartMs,
   srcEndMs,
   width,
@@ -281,7 +336,8 @@ function ClipWaveform({
   );
   useEffect(() => {
     let alive = true;
-    void loadPeaks(path)
+    // 带时长提示：后端一次算准 bucket，避免浏览器整文件解码
+    void loadPeaks(path, mediaMs > 0 ? mediaMs : null)
       .then((p) => {
         if (alive) setData(p);
       })
@@ -291,7 +347,7 @@ function ClipWaveform({
     return () => {
       alive = false;
     };
-  }, [path]);
+  }, [path, mediaMs]);
   const d = useMemo(() => {
     if (!data || width < 4) return "";
     return peaksSvgPath(data, width, 28, srcStartMs, srcEndMs);
@@ -367,7 +423,11 @@ export default function SfxStudioMontage({
   onStudioQuery,
   studioKind,
   onStudioKind,
+  studioFavFilter,
+  onStudioFavFilter,
   studioVisible,
+  favoritedPaths,
+  onToggleFavorite,
   padLabel,
   dragOver,
   recording,
@@ -387,9 +447,13 @@ export default function SfxStudioMontage({
   dropApiRef?: MutableRefObject<StudioDropApi | null>;
   studioQuery: string;
   onStudioQuery: (q: string) => void;
-  studioKind: "sfx" | "bgm";
-  onStudioKind: (k: "sfx" | "bgm") => void;
+  studioKind: "sfx" | "bgm" | "fav";
+  onStudioKind: (k: "sfx" | "bgm" | "fav") => void;
+  studioFavFilter: "all" | "sfx" | "bgm";
+  onStudioFavFilter: (f: "all" | "sfx" | "bgm") => void;
   studioVisible: StudioEntry[];
+  favoritedPaths: string[];
+  onToggleFavorite: (path: string) => void;
   padLabel: (e: { path: string; name: string; category: string }) => string;
   dragOver: boolean;
   recording: boolean;
@@ -415,7 +479,26 @@ export default function SfxStudioMontage({
   const [exportAddMine, setExportAddMine] = useState(true);
   const [previewing, setPreviewing] = useState(false);
   const [editMode, setEditMode] = useState<EditMode>("selection");
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("basic");
+  /** CapCut-style library mini player */
+  const [libPick, setLibPick] = useState<StudioEntry | null>(null);
+  const [libPlaying, setLibPlaying] = useState(false);
+  const [libPosMs, setLibPosMs] = useState(0);
+  const libPlayGen = useRef(0);
+  const libRafRef = useRef(0);
+  const libStartRef = useRef(0);
+  const favoritedSet = useMemo(
+    () => new Set(favoritedPaths),
+    [favoritedPaths],
+  );
   const [snapping, setSnapping] = useState(true);
+  /** 上半区高度占比（素材+声音）；可拖边界改 */
+  const [upperPct, setUpperPct] = useState(38);
+  /** 声音设置宽度 px；可拖边界改 */
+  const [inspW, setInspW] = useState(300);
+  /** 收藏筛选：自定义下拉（不用原生 select） */
+  const [favFilterOpen, setFavFilterOpen] = useState(false);
+  const favFilterRef = useRef<HTMLDivElement | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [volDrag, setVolDrag] = useState<VolDrag | null>(null);
   const [fadeDrag, setFadeDrag] = useState<FadeDrag | null>(null);
@@ -442,8 +525,16 @@ export default function SfxStudioMontage({
   tracksRef.current = tracks;
   const clipsRef = useRef(clips);
   clipsRef.current = clips;
+  /** 拖片段：只在 handler 里写 dragRef，禁止每帧 render 回写（否则会冲掉实时 delta） */
   const dragRef = useRef<DragState | null>(null);
-  dragRef.current = drag;
+  const dragElRef = useRef<HTMLElement | null>(null);
+  const dragBaseLeftPxRef = useRef(0);
+  const dragBaseWidthPxRef = useRef(0);
+  const dragSnapTargetsRef = useRef<number[]>([]);
+  const dragWinCleanupRef = useRef<(() => void) | null>(null);
+  const snapGuideLineRef = useRef<HTMLDivElement | null>(null);
+  const upperElRef = useRef<HTMLDivElement | null>(null);
+  const inspElRef = useRef<HTMLElement | null>(null);
   const volDragRef = useRef<VolDrag | null>(null);
   volDragRef.current = volDrag;
   const fadeDragRef = useRef<FadeDrag | null>(null);
@@ -463,8 +554,45 @@ export default function SfxStudioMontage({
   );
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const activeTrackIdRef = useRef(activeTrackId);
+  activeTrackIdRef.current = activeTrackId;
   const pxPerSecRef = useRef(pxPerSec);
   pxPerSecRef.current = pxPerSec;
+  const exportOpenRef = useRef(exportOpen);
+  exportOpenRef.current = exportOpen;
+  /** 剪映式撤销栈（只记片段） */
+  const undoStackRef = useRef<TlClip[][]>([]);
+  const redoStackRef = useRef<TlClip[][]>([]);
+  const clipboardRef = useRef<TlClip | null>(null);
+
+  const pushUndo = useCallback(() => {
+    undoStackRef.current.push(clipsRef.current.map((c) => ({ ...c })));
+    if (undoStackRef.current.length > 50) undoStackRef.current.shift();
+    redoStackRef.current = [];
+  }, []);
+
+  const applyClips = useCallback((next: TlClip[]) => {
+    clipsRef.current = next;
+    setClips(next);
+  }, []);
+
+  const undoEdit = useCallback(() => {
+    const prev = undoStackRef.current.pop();
+    if (!prev) return;
+    redoStackRef.current.push(clipsRef.current.map((c) => ({ ...c })));
+    applyClips(prev);
+    void invoke("sfx_stop_sfx").catch(() => {});
+    setPreviewing(false);
+  }, [applyClips]);
+
+  const redoEdit = useCallback(() => {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(clipsRef.current.map((c) => ({ ...c })));
+    applyClips(next);
+    void invoke("sfx_stop_sfx").catch(() => {});
+    setPreviewing(false);
+  }, [applyClips]);
 
   /** OpenChatCut-style: paint playhead via GPU transform, no React re-render. */
   const paintPlayhead = useCallback((ms: number, forceTc = false) => {
@@ -559,11 +687,6 @@ export default function SfxStudioMontage({
     return marks;
   }, [projectEndMs, pxPerSec]);
 
-  const trackIndex = useCallback((trackId: string) => {
-    const i = tracksRef.current.findIndex((tr) => tr.id === trackId);
-    return i < 0 ? 0 : i;
-  }, []);
-
   const trackFromClientY = useCallback((clientY: number): string => {
     const root = lanesRef.current;
     const list = tracksRef.current;
@@ -631,6 +754,8 @@ export default function SfxStudioMontage({
         fadeInMs: 0,
         fadeOutMs: 0,
         gainDb: 0,
+        speed: 1,
+        pitchSemitones: 0,
       };
       // Keep ref in sync so sequential batch drops land after each other.
       clipsRef.current = [...clipsRef.current, clip];
@@ -642,6 +767,133 @@ export default function SfxStudioMontage({
     },
     [],
   );
+
+  const stopLibPreview = useCallback(async () => {
+    libPlayGen.current += 1;
+    if (libRafRef.current) {
+      cancelAnimationFrame(libRafRef.current);
+      libRafRef.current = 0;
+    }
+    setLibPlaying(false);
+    setLibPosMs(0);
+    try {
+      await invoke("sfx_stop_sfx");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const tickLibProgress = useCallback((gen: number, durationMs: number) => {
+    const step = () => {
+      if (libPlayGen.current !== gen) return;
+      const elapsed = performance.now() - libStartRef.current;
+      if (elapsed >= durationMs) {
+        setLibPosMs(durationMs);
+        setLibPlaying(false);
+        libRafRef.current = 0;
+        return;
+      }
+      setLibPosMs(elapsed);
+      libRafRef.current = requestAnimationFrame(step);
+    };
+    libRafRef.current = requestAnimationFrame(step);
+  }, []);
+
+  const playLibPreview = useCallback(
+    async (entry: StudioEntry) => {
+      const gen = ++libPlayGen.current;
+      if (libRafRef.current) {
+        cancelAnimationFrame(libRafRef.current);
+        libRafRef.current = 0;
+      }
+      setLibPick(entry);
+      setLibPosMs(0);
+      setLibPlaying(true);
+      try {
+        await invoke("sfx_play", {
+          path: entry.path,
+          volume: sfxVolumeRef.current,
+          fadeMs: 0,
+          pitch: 0,
+        });
+        if (libPlayGen.current !== gen) return;
+        let dur = entry.durationMs ?? 0;
+        if (!dur || dur <= 0) {
+          try {
+            const info = await invoke<{ durationMs?: number | null }>(
+              "sfx_probe",
+              { path: entry.path },
+            );
+            dur = info.durationMs ?? 0;
+            if (dur > 0) {
+              setLibPick((prev) =>
+                prev && prev.path === entry.path
+                  ? { ...prev, durationMs: dur }
+                  : prev,
+              );
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        const hold = Math.max(400, dur || 2000);
+        libStartRef.current = performance.now();
+        tickLibProgress(gen, hold);
+      } catch (e) {
+        if (libPlayGen.current !== gen) return;
+        setLibPlaying(false);
+        onError(String(e));
+      }
+    },
+    [onError, tickLibProgress],
+  );
+
+  const toggleLibPlay = useCallback(() => {
+    if (!libPick) return;
+    if (libPlaying) {
+      void stopLibPreview().then(() => {
+        setLibPick(libPick);
+      });
+      return;
+    }
+    void playLibPreview(libPick);
+  }, [libPick, libPlaying, playLibPreview, stopLibPreview]);
+
+  const closeLibPlayer = useCallback(() => {
+    void stopLibPreview();
+    setLibPick(null);
+  }, [stopLibPreview]);
+
+  useEffect(() => {
+    return () => {
+      libPlayGen.current += 1;
+      if (libRafRef.current) cancelAnimationFrame(libRafRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    void stopLibPreview();
+    setLibPick(null);
+    setFavFilterOpen(false);
+  }, [studioKind, stopLibPreview]);
+
+  useEffect(() => {
+    if (!favFilterOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!favFilterRef.current?.contains(e.target as Node)) {
+        setFavFilterOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFavFilterOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [favFilterOpen]);
 
   const hitTest = useCallback(
     (clientX: number, clientY: number): StudioDropTarget => {
@@ -832,15 +1084,16 @@ export default function SfxStudioMontage({
     });
   };
 
-  const splitClipAt = useCallback((clipId: string, cutAtMs: number) => {
-    setClips((prev) => {
+  const splitClipAt = useCallback(
+    (clipId: string, cutAtMs: number) => {
+      const prev = clipsRef.current;
       const c = prev.find((x) => x.id === clipId);
-      if (!c) return prev;
+      if (!c) return;
       const dur = clipDurationMs(c);
       const offset = Math.round(cutAtMs - c.atMs);
-      if (offset < MIN_CLIP_MS || offset > dur - MIN_CLIP_MS) return prev;
+      if (offset < MIN_CLIP_MS || offset > dur - MIN_CLIP_MS) return;
       const cutSrc = c.srcStartMs + offset;
-      if (cutSrc <= c.srcStartMs || cutSrc >= c.srcEndMs) return prev;
+      if (cutSrc <= c.srcStartMs || cutSrc >= c.srcEndMs) return;
       const left: TlClip = {
         ...c,
         srcEndMs: cutSrc,
@@ -853,34 +1106,253 @@ export default function SfxStudioMontage({
         atMs: c.atMs + offset,
         fadeInMs: 0,
       };
-      return prev.flatMap((x) => (x.id === clipId ? [left, right] : [x]));
-    });
+      pushUndo();
+      applyClips(prev.flatMap((x) => (x.id === clipId ? [left, right] : [x])));
+    },
+    [applyClips, pushUndo],
+  );
+
+  const findClipAtPlayhead = useCallback((): TlClip | null => {
+    const ph = playheadRef.current;
+    const list = clipsRef.current;
+    const sel = selectedIdRef.current
+      ? list.find((c) => c.id === selectedIdRef.current)
+      : null;
+    if (
+      sel &&
+      ph >= sel.atMs + 1 &&
+      ph <= sel.atMs + clipDurationMs(sel) - 1
+    ) {
+      return sel;
+    }
+    return (
+      [...list]
+        .reverse()
+        .find(
+          (c) =>
+            ph >= c.atMs + 1 && ph <= c.atMs + clipDurationMs(c) - 1,
+        ) ?? null
+    );
   }, []);
 
   const splitAtPlayhead = useCallback(() => {
     const ph = playheadRef.current;
-    const list = clipsRef.current;
-    // Prefer the clip under the playhead (same track layer order: topmost = last).
-    const under = [...list]
-      .reverse()
-      .find(
-        (c) =>
-          ph >= c.atMs + 1 &&
-          ph <= c.atMs + clipDurationMs(c) - 1,
-      );
-    const sel = selectedIdRef.current;
-    const selected = sel ? list.find((c) => c.id === sel) : null;
-    const selectedUnder =
-      selected &&
-      ph >= selected.atMs + 1 &&
-      ph <= selected.atMs + clipDurationMs(selected) - 1
-        ? selected
-        : null;
-    const target = selectedUnder || under;
+    const target = findClipAtPlayhead();
     if (!target) return;
     splitClipAt(target.id, ph);
     setSelectedId(target.id);
-  }, [splitClipAt]);
+  }, [findClipAtPlayhead, splitClipAt]);
+
+  /** 剪映 Q：删播放头前 · W：删播放头后 */
+  const trimAtPlayhead = useCallback(
+    (side: "q" | "w") => {
+      const c = findClipAtPlayhead();
+      if (!c) return;
+      const ph = playheadRef.current;
+      const dur = clipDurationMs(c);
+      const offset = Math.round(ph - c.atMs);
+      if (offset < MIN_CLIP_MS || offset > dur - MIN_CLIP_MS) return;
+      pushUndo();
+      if (side === "q") {
+        applyClips(
+          clipsRef.current.map((x) =>
+            x.id !== c.id
+              ? x
+              : {
+                  ...c,
+                  atMs: c.atMs + offset,
+                  srcStartMs: c.srcStartMs + offset,
+                  fadeInMs: 0,
+                },
+          ),
+        );
+      } else {
+        applyClips(
+          clipsRef.current.map((x) =>
+            x.id !== c.id
+              ? x
+              : {
+                  ...c,
+                  srcEndMs: c.srcStartMs + offset,
+                  fadeOutMs: 0,
+                },
+          ),
+        );
+      }
+      setSelectedId(c.id);
+    },
+    [applyClips, findClipAtPlayhead, pushUndo],
+  );
+
+  const fitTimeline = useCallback(() => {
+    let end = 2000;
+    for (const c of clipsRef.current) {
+      end = Math.max(end, c.atMs + clipDurationMs(c));
+    }
+    const sc = scrollRef.current;
+    const w = Math.max(320, sc?.clientWidth ?? 720);
+    const sec = Math.max(1, end / 1000);
+    setPxPerSec(Math.max(1, Math.min(160, Math.floor((w - 48) / sec))));
+    if (sc) sc.scrollLeft = 0;
+    paintPlayhead(playheadRef.current, true);
+  }, [paintPlayhead]);
+
+  /**
+   * 剪映：Ctrl + 滚轮 = 以鼠标下时间为锚点缩放时间线
+   * （不按 Ctrl 时仍是正常滚动；native + passive:false 才能拦住浏览器整页缩放）
+   */
+  useEffect(() => {
+    const sc = scrollRef.current;
+    if (!sc) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = sc.getBoundingClientRect();
+      const localX = e.clientX - rect.left;
+      const oldPx = pxPerSecRef.current;
+      const anchorMs = Math.max(
+        0,
+        Math.round(((sc.scrollLeft + localX) / Math.max(1, oldPx)) * 1000),
+      );
+      const factor = e.deltaY > 0 ? 0.88 : 1.14;
+      const next = Math.max(
+        1,
+        Math.min(160, Math.round(oldPx * factor * 10) / 10),
+      );
+      if (Math.abs(next - oldPx) < 0.05) return;
+      setPxPerSec(next);
+      requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const newX = (anchorMs / 1000) * next;
+        el.scrollLeft = Math.max(0, newX - localX);
+        paintPlayhead(playheadRef.current, true);
+      });
+    };
+    sc.addEventListener("wheel", onWheel, { passive: false });
+    return () => sc.removeEventListener("wheel", onWheel);
+  }, [paintPlayhead]);
+
+  const pasteClipboard = useCallback(() => {
+    const src = clipboardRef.current;
+    if (!src) return;
+    pushUndo();
+    const tid =
+      activeTrackIdRef.current || tracksRef.current[0]?.id || "tr1";
+    const at = Math.max(0, Math.round(playheadRef.current));
+    const clip: TlClip = {
+      ...src,
+      id: newId("clip"),
+      trackId: tid,
+      atMs: at,
+    };
+    applyClips([...clipsRef.current, clip]);
+    setSelectedId(clip.id);
+    setActiveTrackId(tid);
+  }, [applyClips, pushUndo]);
+
+  /**
+   * 跟手拖：移动只用 translate3d（GPU，不触 layout）；
+   * 修剪才改 left/width。立刻写 DOM，绝不 rAF 排队。
+   */
+  const paintClipDragDom = useCallback((d: DragState) => {
+    const el = dragElRef.current;
+    if (!el) return;
+    const px = pxPerSecRef.current;
+    const guide = snapGuideLineRef.current;
+
+    if (d.kind === "move") {
+      const atMs = Math.max(0, d.baseAt + d.deltaMs);
+      const dx = ((atMs - d.baseAt) / 1000) * px;
+      const from = tracksRef.current.findIndex((tr) => tr.id === d.baseTrackId);
+      const to = tracksRef.current.findIndex((tr) => tr.id === d.targetTrackId);
+      const fi = from < 0 ? 0 : from;
+      const ti = to < 0 ? fi : to;
+      const dy = (ti - fi) * TRACK_H;
+      el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+      el.style.zIndex = "24";
+    } else {
+      const fake: TlClip = {
+        id: d.id,
+        trackId: d.baseTrackId,
+        path: "",
+        label: "",
+        mediaMs: d.mediaMs,
+        srcStartMs: d.baseSrcStart,
+        srcEndMs: d.baseSrcEnd,
+        atMs: d.baseAt,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+        gainDb: 0,
+        speed: 1,
+        pitchSemitones: 0,
+      };
+      const p = previewClip(fake, d);
+      const dur = Math.max(MIN_CLIP_MS, p.srcEndMs - p.srcStartMs);
+      el.style.left = `${(p.atMs / 1000) * px}px`;
+      el.style.width = `${Math.max(28, (dur / 1000) * px)}px`;
+      el.style.transform = "translate3d(0,0,0)";
+      el.style.zIndex = "24";
+    }
+
+    if (guide) {
+      if (d.snapGuideMs != null) {
+        guide.style.opacity = "1";
+        guide.style.transform = `translate3d(${(d.snapGuideMs / 1000) * px}px, 0, 0)`;
+      } else {
+        guide.style.opacity = "0";
+      }
+    }
+  }, []);
+
+  const endClipDrag = useCallback(() => {
+    dragWinCleanupRef.current?.();
+    dragWinCleanupRef.current = null;
+    const d = dragRef.current;
+    dragRef.current = null;
+    setDrag(null);
+    const guide = snapGuideLineRef.current;
+    if (guide) guide.style.opacity = "0";
+    const el = dragElRef.current;
+    dragElRef.current = null;
+    if (el) {
+      el.style.transform = "";
+      el.style.zIndex = "";
+      el.classList.remove("dragging");
+    }
+    if (!d) return;
+    const fake: TlClip = {
+      id: d.id,
+      trackId: d.baseTrackId,
+      path: "",
+      label: "",
+      mediaMs: d.mediaMs,
+      srcStartMs: d.baseSrcStart,
+      srcEndMs: d.baseSrcEnd,
+      atMs: d.baseAt,
+      fadeInMs: 0,
+      fadeOutMs: 0,
+      gainDb: 0,
+      speed: 1,
+      pitchSemitones: 0,
+    };
+    const p = previewClip(fake, d);
+    setClips((prev) =>
+      prev.map((c) =>
+        c.id === d.id
+          ? {
+              ...c,
+              atMs: p.atMs,
+              trackId: p.trackId,
+              srcStartMs: p.srcStartMs,
+              srcEndMs: p.srcEndMs,
+            }
+          : c,
+      ),
+    );
+    if (d.kind === "move") setActiveTrackId(p.trackId);
+  }, []);
 
   const startDrag = (
     e: ReactPointerEvent<HTMLDivElement>,
@@ -890,9 +1362,34 @@ export default function SfxStudioMontage({
     if (editModeRef.current === "blade") return;
     e.preventDefault();
     e.stopPropagation();
+    // 上一次拖没松干净
+    dragWinCleanupRef.current?.();
+    dragWinCleanupRef.current = null;
+
+    pushUndo();
     setSelectedId(clip.id);
     setActiveTrackId(clip.trackId);
-    e.currentTarget.setPointerCapture(e.pointerId);
+
+    const px = pxPerSecRef.current;
+    const baseDur = Math.max(MIN_CLIP_MS, clip.srcEndMs - clip.srcStartMs);
+    const el =
+      (e.currentTarget.closest(".sfx-tl-clip") as HTMLElement | null) ||
+      (document.querySelector(
+        `.sfx-tl-clip[data-clip-id="${CSS.escape(clip.id)}"]`,
+      ) as HTMLElement | null);
+    if (!el) return;
+    dragElRef.current = el;
+    dragBaseLeftPxRef.current = (clip.atMs / 1000) * px;
+    dragBaseWidthPxRef.current = Math.max(28, (baseDur / 1000) * px);
+    dragSnapTargetsRef.current = collectSnapTargets(
+      clipsRef.current,
+      clip.id,
+      playheadRef.current,
+    );
+    el.classList.add("dragging");
+    el.style.willChange = "transform";
+    el.style.zIndex = "24";
+
     const next: DragState = {
       kind,
       id: clip.id,
@@ -908,6 +1405,42 @@ export default function SfxStudioMontage({
     };
     dragRef.current = next;
     setDrag(next);
+
+    const onMove = (ev: PointerEvent) => {
+      const d0 = dragRef.current;
+      if (!d0) return;
+      let deltaMs = Math.round(((ev.clientX - d0.startX) / pxPerSecRef.current) * 1000);
+      let snapGuideMs: number | null = null;
+      if (snappingRef.current) {
+        const threshMs = Math.max(
+          20,
+          Math.round((SNAP_PX / pxPerSecRef.current) * 1000),
+        );
+        const snapped = snapDragDelta(
+          d0,
+          deltaMs,
+          dragSnapTargetsRef.current,
+          threshMs,
+        );
+        deltaMs = snapped.deltaMs;
+        snapGuideMs = snapped.snapGuideMs;
+      }
+      const targetTrackId =
+        d0.kind === "move" ? trackFromClientY(ev.clientY) : d0.baseTrackId;
+      const nextD = { ...d0, deltaMs, targetTrackId, snapGuideMs };
+      dragRef.current = nextD;
+      // 同步指针立刻画，零 rAF 排队
+      paintClipDragDom(nextD);
+    };
+    const onUp = () => endClipDrag();
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    dragWinCleanupRef.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
   };
 
   const onClipPointerDown = (
@@ -915,13 +1448,14 @@ export default function SfxStudioMontage({
     clip: TlClip,
   ) => {
     if (e.button !== 0) return;
+    // 点片段也先落红线
+    seekFromEvent(e.clientX, true);
     if (editModeRef.current === "blade") {
       e.preventDefault();
       e.stopPropagation();
-      const cutAt = atMsFromClientX(e.clientX);
+      const cutAt = playheadRef.current;
       splitClipAt(clip.id, cutAt);
       setSelectedId(clip.id);
-      paintPlayhead(cutAt, true);
       return;
     }
     startDrag(e, clip, "move");
@@ -1137,29 +1671,9 @@ export default function SfxStudioMontage({
     };
   };
 
-  const onPointerMove = (e: ReactPointerEvent) => {
-    if (fadeDragRef.current) return; // handled by window listeners
-    if (volDragRef.current) return; // handled by window listeners
-    const d = dragRef.current;
-    if (!d) return;
-    let deltaMs = Math.round(((e.clientX - d.startX) / pxPerSec) * 1000);
-    let snapGuideMs: number | null = null;
-    if (snappingRef.current) {
-      const threshMs = Math.max(20, Math.round((SNAP_PX / pxPerSec) * 1000));
-      const targets = collectSnapTargets(
-        clipsRef.current,
-        d.id,
-        playheadRef.current,
-      );
-      const snapped = snapDragDelta(d, deltaMs, targets, threshMs);
-      deltaMs = snapped.deltaMs;
-      snapGuideMs = snapped.snapGuideMs;
-    }
-    const targetTrackId =
-      d.kind === "move" ? trackFromClientY(e.clientY) : d.baseTrackId;
-    const next = { ...d, deltaMs, targetTrackId, snapGuideMs };
-    dragRef.current = next;
-    setDrag(next);
+  const onPointerMove = (_e: ReactPointerEvent) => {
+    // 片段拖动走 window 监听（零延迟）；此处只给别的逻辑占位
+    if (fadeDragRef.current || volDragRef.current || dragRef.current) return;
   };
 
   const onPointerUp = () => {
@@ -1171,38 +1685,9 @@ export default function SfxStudioMontage({
       finishVolDrag();
       return;
     }
-    const d = dragRef.current;
-    dragRef.current = null;
-    setDrag(null);
-    if (!d) return;
-    const fake: TlClip = {
-      id: d.id,
-      trackId: d.baseTrackId,
-      path: "",
-      label: "",
-      mediaMs: d.mediaMs,
-      srcStartMs: d.baseSrcStart,
-      srcEndMs: d.baseSrcEnd,
-      atMs: d.baseAt,
-      fadeInMs: 0,
-      fadeOutMs: 0,
-      gainDb: 0,
-    };
-    const p = previewClip(fake, d);
-    setClips((prev) =>
-      prev.map((c) =>
-        c.id === d.id
-          ? {
-              ...c,
-              atMs: p.atMs,
-              trackId: p.trackId,
-              srcStartMs: p.srcStartMs,
-              srcEndMs: p.srcEndMs,
-            }
-          : c,
-      ),
-    );
-    if (d.kind === "move") setActiveTrackId(p.trackId);
+    if (dragRef.current) {
+      endClipDrag();
+    }
   };
 
   const flushScrub = useCallback(() => {
@@ -1241,15 +1726,40 @@ export default function SfxStudioMontage({
     [atMsFromClientX, flushScrub, paintPlayhead],
   );
 
-  const startScrub = (e: ReactPointerEvent<HTMLElement>) => {
+  /**
+   * 时间线区域内点击：一律移动播放头（标尺红线）。
+   * 空白处再允许拖着 scrub；点在片段上只定位，由片段自己处理拖动/刀片。
+   */
+  const startScrub = (
+    e: ReactPointerEvent<HTMLElement>,
+    opts?: { allowDragScrub?: boolean },
+  ) => {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest(".sfx-tl-clip")) return;
+    const t = e.target as HTMLElement;
+    // 左侧轨道名不抢时间
+    if (t.closest(".sfx-tl-side")) return;
     if (previewRafRef.current) void stopPreview();
-    scrubbingRef.current = true;
-    // Capture on timeline root so move/up handlers (on .sfx-tl) keep receiving events.
-    const root = (e.currentTarget.closest(".sfx-tl") ?? e.currentTarget) as HTMLElement;
-    root.setPointerCapture?.(e.pointerId);
     seekFromEvent(e.clientX, true);
+
+    const onClip = Boolean(t.closest(".sfx-tl-clip"));
+    const onChrome = Boolean(
+      t.closest(
+        ".sfx-tl-handle, .sfx-tl-vol-hit, .sfx-tl-fade-handle, .sfx-tl-clip-x",
+      ),
+    );
+    // 点片段/控件：只跳播放头，不进入 scrub 拖动（避免和拖片段抢事件）
+    const allowDrag =
+      opts?.allowDragScrub !== false && !onClip && !onChrome;
+    if (!allowDrag) return;
+
+    scrubbingRef.current = true;
+    const root = (e.currentTarget.closest(".sfx-tl") ??
+      e.currentTarget) as HTMLElement;
+    try {
+      root.setPointerCapture?.(e.pointerId);
+    } catch {
+      /* ignore */
+    }
   };
 
   const onScrubMove = (e: ReactPointerEvent) => {
@@ -1332,11 +1842,147 @@ export default function SfxStudioMontage({
   const removeClip = useCallback(
     (id: string) => {
       void stopPreview();
-      clipsRef.current = clipsRef.current.filter((c) => c.id !== id);
-      setClips((prev) => prev.filter((c) => c.id !== id));
+      if (!clipsRef.current.some((c) => c.id === id)) return;
+      pushUndo();
+      applyClips(clipsRef.current.filter((c) => c.id !== id));
       setSelectedId((cur) => (cur === id ? null : cur));
     },
-    [stopPreview],
+    [applyClips, pushUndo, stopPreview],
+  );
+
+  const selectedClip = useMemo(
+    () => (selectedId ? clips.find((c) => c.id === selectedId) ?? null : null),
+    [clips, selectedId],
+  );
+
+  const previewDebounceRef = useRef(0);
+  /** 声音设置正在实时试听的片段 id（BASS 直播，不跑 ffmpeg） */
+  const inspLiveIdRef = useRef<string | null>(null);
+  const previewSelectedClipRef = useRef<() => Promise<void>>(async () => {});
+
+  /**
+   * 声音设置实时试听：BASS 直播 + 红线跟着走。
+   * 不跑 ffmpeg、不整轨重渲；导出仍走渲染链路。
+   */
+  const previewSelectedClip = useCallback(async () => {
+    const id = selectedIdRef.current;
+    const c = id ? clipsRef.current.find((x) => x.id === id) : null;
+    if (!c) {
+      onError(t("sfxStudioInspEmpty"));
+      return;
+    }
+    // 打断整轨混听，但不要清空时间线状态
+    previewGen.current += 1;
+    clearPreviewTimers();
+    stopPlayheadFollow();
+    setPreviewing(false);
+    const gen = ++previewGen.current;
+    inspLiveIdRef.current = c.id;
+    const speed = Math.max(0.25, Math.min(4, c.speed ?? 1));
+    const dur = Math.max(MIN_CLIP_MS, clipDurationMs(c));
+    // 始终从片段起点跟标尺，红线跟着声音走
+    paintPlayhead(c.atMs, true);
+    startPlayheadFollow(c.atMs, c.atMs + dur, gen);
+    try {
+      await invoke("sfx_set_interrupt", { interrupt: true });
+      if (previewGen.current !== gen) return;
+      await invoke("sfx_play", {
+        path: c.path,
+        volume: sfxVolumeRef.current * dbToLinear(c.gainDb),
+        fadeMs: Math.max(0, Math.round(c.fadeInMs)),
+        fadeOutMs: Math.max(0, Math.round(c.fadeOutMs)),
+        pitch: c.pitchSemitones ?? 0,
+        speed,
+        rangeStartMs: Math.round(c.srcStartMs),
+        rangeEndMs: Math.round(c.srcEndMs),
+        tag: c.id,
+      });
+      if (previewGen.current !== gen) return;
+      const tid = window.setTimeout(() => {
+        if (previewGen.current !== gen) return;
+        if (inspLiveIdRef.current === c.id) inspLiveIdRef.current = null;
+        stopPlayheadFollow();
+        try {
+          void invoke("sfx_set_interrupt", {
+            interrupt: sfxInterruptRef.current,
+          });
+        } catch {
+          /* ignore */
+        }
+      }, dur + 120);
+      previewTimersRef.current.push(tid);
+    } catch (e) {
+      inspLiveIdRef.current = null;
+      stopPlayheadFollow();
+      onError(String(e));
+      try {
+        await invoke("sfx_set_interrupt", {
+          interrupt: sfxInterruptRef.current,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [
+    clearPreviewTimers,
+    onError,
+    paintPlayhead,
+    startPlayheadFollow,
+    stopPlayheadFollow,
+    t,
+  ]);
+  previewSelectedClipRef.current = previewSelectedClip;
+
+  /**
+   * 改选中片段。
+   * - 只改音量且正在播：热更新增益，红线继续走
+   * - 其它参数：短防抖后 BASS 重播 + 红线重跟
+   */
+  const patchSelected = useCallback(
+    (partial: Partial<TlClip>, record = true, autoPreview = true) => {
+      const id = selectedIdRef.current;
+      if (!id) return;
+      if (record) pushUndo();
+      const next = clipsRef.current.map((c) => {
+        if (c.id !== id) return c;
+        const merged = { ...c, ...partial };
+        if (partial.speed != null) {
+          merged.speed = Math.max(
+            0.25,
+            Math.min(4, Number(partial.speed) || 1),
+          );
+        }
+        if (partial.pitchSemitones != null) {
+          merged.pitchSemitones = Math.max(
+            -12,
+            Math.min(12, Number(partial.pitchSemitones) || 0),
+          );
+        }
+        return merged;
+      });
+      applyClips(next);
+      if (!autoPreview) return;
+
+      const keys = Object.keys(partial);
+      const onlyGain = keys.length === 1 && partial.gainDb != null;
+
+      if (onlyGain) {
+        applyLiveClipVolume(id, partial.gainDb!);
+        // 已在实时试听：只改音量，红线保持跟着走
+        if (inspLiveIdRef.current === id && previewRafRef.current) return;
+        window.clearTimeout(previewDebounceRef.current);
+        previewDebounceRef.current = window.setTimeout(() => {
+          void previewSelectedClipRef.current();
+        }, 60);
+        return;
+      }
+
+      window.clearTimeout(previewDebounceRef.current);
+      previewDebounceRef.current = window.setTimeout(() => {
+        void previewSelectedClipRef.current();
+      }, 90);
+    },
+    [applyClips, applyLiveClipVolume, pushUndo],
   );
 
   // HMR / leave studio: kill lingering montage voices (interrupt=false stacks them).
@@ -1400,34 +2046,69 @@ export default function SfxStudioMontage({
           // Play if playhead is inside or before this clip (not past its end).
           if (endAt <= startAt + 1) continue;
           const delay = Math.max(0, c.atMs - startAt);
+          const speed = Math.max(0.25, Math.min(4, c.speed ?? 1));
+          // 时间线坐标 → 源文件坐标：变速后 1ms 时间线 = speed ms 源素材
           let rangeStart = c.srcStartMs;
           if (c.atMs < startAt) {
-            rangeStart = c.srcStartMs + (startAt - c.atMs);
+            rangeStart = c.srcStartMs + (startAt - c.atMs) * speed;
           }
           const rangeEnd = c.srcEndMs;
           if (rangeEnd <= rangeStart + 20) continue;
           timers.push(
             window.setTimeout(() => {
               if (previewGen.current !== gen) return;
-              const intoClip = Math.max(0, startAt - c.atMs);
-              const playDur = Math.max(0, rangeEnd - rangeStart);
-              let fadeIn = Math.max(0, c.fadeInMs - intoClip);
-              let fadeOut = c.fadeOutMs;
-              if (fadeIn + fadeOut > playDur) {
-                const pair = clampFadePair(fadeIn, fadeOut, playDur);
-                fadeIn = pair.fadeInMs;
-                fadeOut = pair.fadeOutMs;
-              }
-              void invoke("sfx_play", {
-                path: c.path,
-                volume: sfxVolume * dbToLinear(c.gainDb),
-                fadeMs: Math.round(fadeIn),
-                fadeOutMs: Math.round(fadeOut),
-                pitch: 0,
-                rangeStartMs: Math.round(rangeStart),
-                rangeEndMs: Math.round(rangeEnd),
-                tag: c.id,
-              }).catch((e) => onError(String(e)));
+              const intoClipTl = Math.max(0, startAt - c.atMs);
+              const needFx =
+                Math.abs(speed - 1) > 0.01 ||
+                Math.abs(c.pitchSemitones ?? 0) > 0.05 ||
+                Math.abs(c.gainDb) > 0.05 ||
+                c.fadeInMs > 0 ||
+                c.fadeOutMs > 0;
+              void (async () => {
+                try {
+                  if (needFx) {
+                    // 与导出一致：先渲染再播，速度可反复改
+                    const rendered = await invoke<string>("sfx_render_clip_fx", {
+                      path: c.path,
+                      startMs: Math.round(rangeStart),
+                      endMs: Math.round(rangeEnd),
+                      fadeInMs: Math.round(
+                        Math.max(0, c.fadeInMs - intoClipTl),
+                      ),
+                      fadeOutMs: Math.round(c.fadeOutMs),
+                      volume: dbToLinear(c.gainDb),
+                      speed,
+                      pitch: c.pitchSemitones ?? 0,
+                    });
+                    if (previewGen.current !== gen) return;
+                    await invoke("sfx_play", {
+                      path: rendered,
+                      volume: sfxVolumeRef.current,
+                      fadeMs: 0,
+                      fadeOutMs: 0,
+                      pitch: 0,
+                      speed: 1,
+                      rangeStartMs: null,
+                      rangeEndMs: null,
+                      tag: c.id,
+                    });
+                  } else {
+                    await invoke("sfx_play", {
+                      path: c.path,
+                      volume: sfxVolumeRef.current,
+                      fadeMs: 0,
+                      fadeOutMs: 0,
+                      pitch: 0,
+                      speed: 1,
+                      rangeStartMs: Math.round(rangeStart),
+                      rangeEndMs: Math.round(rangeEnd),
+                      tag: c.id,
+                    });
+                  }
+                } catch (e) {
+                  onError(String(e));
+                }
+              })();
             }, delay),
           );
         }
@@ -1520,6 +2201,8 @@ export default function SfxStudioMontage({
           fadeInMs: c.fadeInMs,
           fadeOutMs: c.fadeOutMs,
           volume: dbToLinear(c.gainDb),
+          speed: c.speed ?? 1,
+          pitch: c.pitchSemitones ?? 0,
         })),
         libraryRoot: libraryRoot || "",
         category: exportTarget === "mine" ? "我制作的" : null,
@@ -1537,171 +2220,892 @@ export default function SfxStudioMontage({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.key === " " || e.code === "Space") {
+      if (e.defaultPrevented || e.isComposing) return;
+      if (exportOpenRef.current) return;
+
+      // 搜索框：Esc 失焦；Ctrl 组合仍可用撤销等
+      if (isTypingTarget(e.target)) {
+        if (e.key === "Escape") {
+          (e.target as HTMLElement).blur?.();
+          e.preventDefault();
+        }
+        const mod = e.ctrlKey || e.metaKey;
+        if (!(mod && (e.key === "z" || e.key === "Z" || e.key === "y" || e.key === "Y"))) {
+          return;
+        }
+      }
+
+      const key = e.key;
+      const code = e.code;
+      const mod = e.ctrlKey || e.metaKey;
+      const shift = e.shiftKey;
+
+      // ── 剪映：撤销 / 重做 ──
+      if (mod && !e.altKey && (key === "z" || key === "Z")) {
         e.preventDefault();
-        if (previewing) void stopPreview();
-        else void previewMix();
+        if (shift) redoEdit();
+        else undoEdit();
         return;
       }
-      if (e.key === "v" || e.key === "V") {
-        setEditMode("selection");
+      if (mod && !shift && (key === "y" || key === "Y")) {
+        e.preventDefault();
+        redoEdit();
         return;
       }
-      if (e.key === "b" || e.key === "B") {
+
+      // ── 剪映：复制 / 剪切 / 粘贴 ──
+      if (mod && !shift && (key === "c" || key === "C")) {
+        const id = selectedIdRef.current;
+        const c = id ? clipsRef.current.find((x) => x.id === id) : null;
+        if (c) {
+          e.preventDefault();
+          clipboardRef.current = { ...c };
+        }
+        return;
+      }
+      if (mod && !shift && (key === "x" || key === "X")) {
+        const id = selectedIdRef.current;
+        const c = id ? clipsRef.current.find((x) => x.id === id) : null;
+        if (c) {
+          e.preventDefault();
+          clipboardRef.current = { ...c };
+          removeClip(c.id);
+        }
+        return;
+      }
+      if (mod && !shift && (key === "v" || key === "V")) {
+        e.preventDefault();
+        pasteClipboard();
+        return;
+      }
+      // Ctrl+B / Ctrl+K：刀片模式
+      if (mod && !shift && (key === "b" || key === "B" || key === "k" || key === "K")) {
+        e.preventDefault();
         setEditMode("blade");
         return;
       }
-      if (e.key === "s" || e.key === "S") {
-        setSnapping((v) => !v);
+      // 剪映：Ctrl+D 复制一份到播放头
+      if (mod && !shift && (key === "d" || key === "D")) {
+        const id = selectedIdRef.current;
+        const c = id ? clipsRef.current.find((x) => x.id === id) : null;
+        if (c) {
+          e.preventDefault();
+          clipboardRef.current = { ...c };
+          pasteClipboard();
+        }
         return;
       }
-      if (e.key === "c" || e.key === "C") {
+
+      // 空格：播放/暂停
+      if (key === " " || code === "Space") {
         e.preventDefault();
-        splitAtPlayhead();
+        e.stopPropagation();
+        if (previewingRef.current) void stopPreview();
+        else void previewMix();
         return;
       }
-      if (e.key === "Delete" || e.key === "Backspace") {
+
+      if (!mod && !e.altKey) {
+        // V 选择 · C/B 在播放头切开
+        if (key === "v" || key === "V") {
+          e.preventDefault();
+          setEditMode("selection");
+          return;
+        }
+        if (key === "c" || key === "C" || key === "b" || key === "B") {
+          e.preventDefault();
+          splitAtPlayhead();
+          return;
+        }
+        // 剪映：S 吸附
+        if (key === "s" || key === "S") {
+          e.preventDefault();
+          setSnapping((v) => !v);
+          return;
+        }
+        // 剪映：Q 掐头 · W 去尾
+        if (key === "q" || key === "Q") {
+          e.preventDefault();
+          trimAtPlayhead("q");
+          return;
+        }
+        if (key === "w" || key === "W") {
+          e.preventDefault();
+          trimAtPlayhead("w");
+          return;
+        }
+        // 剪映：+/- 缩放时间线
+        if (key === "=" || key === "+" || code === "NumpadAdd") {
+          e.preventDefault();
+          setPxPerSec((v) => Math.min(160, v + 8));
+          return;
+        }
+        if (key === "-" || key === "_" || code === "NumpadSubtract") {
+          e.preventDefault();
+          setPxPerSec((v) => Math.max(1, v - 8));
+          return;
+        }
+        // 剪映：Shift+Z 适应时间线
+        if (shift && (key === "z" || key === "Z")) {
+          e.preventDefault();
+          fitTimeline();
+          return;
+        }
+      }
+
+      // 方向键挪播放头（Shift 大步 1s）
+      if (key === "ArrowLeft") {
+        e.preventDefault();
+        const step = shift ? 1000 : 100;
+        paintPlayhead(Math.max(0, playheadRef.current - step), true);
+        return;
+      }
+      if (key === "ArrowRight") {
+        e.preventDefault();
+        const step = shift ? 1000 : 100;
+        paintPlayhead(playheadRef.current + step, true);
+        return;
+      }
+      if (key === "Home") {
+        e.preventDefault();
+        paintPlayhead(0, true);
+        return;
+      }
+      if (key === "End") {
+        e.preventDefault();
+        let end = 0;
+        for (const c of clipsRef.current) {
+          end = Math.max(end, c.atMs + clipDurationMs(c));
+        }
+        paintPlayhead(end, true);
+        return;
+      }
+
+      // 删除
+      if (key === "Delete" || key === "Backspace") {
         if (selectedIdRef.current) {
           e.preventDefault();
           removeClip(selectedIdRef.current);
         }
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [previewMix, previewing, splitAtPlayhead, stopPreview]);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [
+    fitTimeline,
+    paintPlayhead,
+    pasteClipboard,
+    previewMix,
+    redoEdit,
+    removeClip,
+    splitAtPlayhead,
+    stopPreview,
+    trimAtPlayhead,
+    undoEdit,
+  ]);
 
   const q = studioQuery.trim();
+  const libEmptyText = q
+    ? studioKind === "bgm"
+      ? t("sfxStudioSearchEmptyBgm")
+      : studioKind === "fav"
+        ? t("sfxStudioSearchEmptyFav")
+        : t("sfxStudioSearchEmpty")
+    : studioKind === "bgm"
+      ? t("sfxStudioLibEmptyBgm")
+      : studioKind === "fav"
+        ? t("sfxStudioLibEmptyFav")
+        : t("sfxStudioLibEmpty");
+  const libDurMs = Math.max(0, libPick?.durationMs ?? 0);
+  const libProgress = libDurMs > 0 ? Math.min(1, libPosMs / libDurMs) : 0;
+
+  /** 上下拖：立刻改 height(px)，不排队 rAF、不每帧 setState */
+  const startVSplit = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const root = rootRef.current;
+    const upper = upperElRef.current;
+    if (!root || !upper) return;
+    const startY = e.clientY;
+    const boxH = Math.max(1, root.clientHeight);
+    const startH = upper.getBoundingClientRect().height;
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    // 拖动期用固定 px，比 flex% 更少抖动
+    upper.style.flex = "0 0 auto";
+    upper.style.height = `${startH}px`;
+    upper.style.minHeight = "0";
+    upper.style.maxHeight = "none";
+    let latestPct = upperPct;
+    const onMove = (ev: PointerEvent) => {
+      const dy = ev.clientY - startY;
+      const h = Math.max(boxH * 0.2, Math.min(boxH * 0.72, startH + dy));
+      upper.style.height = `${h}px`;
+      latestPct = (h / boxH) * 100;
+    };
+    const onUp = (ev: PointerEvent) => {
+      try {
+        el.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onUp);
+      upper.style.flex = `0 0 ${latestPct}%`;
+      upper.style.height = "";
+      upper.style.minHeight = "";
+      upper.style.maxHeight = "";
+      setUpperPct(latestPct);
+    };
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
+  };
+
+  /** 左右拖：立刻改 width，不排队 */
+  const startHSplit = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const root = rootRef.current;
+    const insp = inspElRef.current;
+    if (!root || !insp) return;
+    const startX = e.clientX;
+    const startW = insp.getBoundingClientRect().width;
+    const boxW = Math.max(1, root.clientWidth);
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    let latest = startW;
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      // 分隔在左素材与右声音之间：向右拖 → 声音变窄
+      const w = Math.max(220, Math.min(boxW * 0.48, startW - dx));
+      latest = w;
+      insp.style.width = `${w}px`;
+      insp.style.flex = `0 0 ${w}px`;
+    };
+    const onUp = (ev: PointerEvent) => {
+      try {
+        el.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onUp);
+      setInspW(latest);
+    };
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
+  };
 
   return (
     <div className="sfx-studio" ref={rootRef}>
-      <div className="sfx-studio-top">
-        <div className="sfx-studio-kind" role="tablist" aria-label={t("sfxStudioSearch")}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={studioKind === "sfx"}
-            className={
-              studioKind === "sfx" ? "sfx-studio-kind-btn on" : "sfx-studio-kind-btn"
-            }
-            onClick={() => onStudioKind("sfx")}
+      {/* 上：素材搜索 | 声音设置 */}
+      <div
+        className="sfx-studio-upper"
+        ref={upperElRef}
+        style={{ flex: `0 0 ${upperPct}%` }}
+      >
+      <section
+        className="sfx-studio-lib"
+        aria-label={t("sfxStudioMaterials")}
+      >
+        <div className="sfx-studio-top">
+          <div
+            className="sfx-studio-kind"
+            role="tablist"
+            aria-label={t("sfxStudioMaterials")}
           >
-            {t("sfxStudioKindSfx")}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={studioKind === "bgm"}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={studioKind === "sfx"}
+              className={
+                studioKind === "sfx"
+                  ? "sfx-studio-kind-btn on"
+                  : "sfx-studio-kind-btn"
+              }
+              onClick={() => onStudioKind("sfx")}
+            >
+              {t("sfxStudioKindSfx")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={studioKind === "bgm"}
+              className={
+                studioKind === "bgm"
+                  ? "sfx-studio-kind-btn on"
+                  : "sfx-studio-kind-btn"
+              }
+              onClick={() => onStudioKind("bgm")}
+            >
+              {t("sfxStudioKindBgm")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={studioKind === "fav"}
+              className={
+                studioKind === "fav"
+                  ? "sfx-studio-kind-btn on"
+                  : "sfx-studio-kind-btn"
+              }
+              onClick={() => onStudioKind("fav")}
+            >
+              {t("sfxStudioKindFav")}
+            </button>
+          </div>
+          <div
             className={
-              studioKind === "bgm" ? "sfx-studio-kind-btn on" : "sfx-studio-kind-btn"
+              studioKind === "fav"
+                ? "sfx-studio-top-search with-filter"
+                : "sfx-studio-top-search"
             }
-            onClick={() => onStudioKind("bgm")}
           >
-            {t("sfxStudioKindBgm")}
-          </button>
-        </div>
-        <div className="sfx-studio-top-search">
-          <input
-            className="sfx-search sfx-studio-search"
-            type="search"
-            value={studioQuery}
-            placeholder={
-              studioKind === "bgm"
-                ? t("sfxStudioSearchBgm")
-                : t("sfxStudioSearchSfx")
-            }
-            onChange={(e) => onStudioQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") onStudioQuery("");
-            }}
-          />
-          {q ? (
-            <div className="sfx-studio-top-hits">
-              {studioVisible.length === 0 ? (
-                <p className="muted sfx-studio-pick-empty">
-                  {studioKind === "bgm"
-                    ? t("sfxStudioSearchEmptyBgm")
-                    : t("sfxStudioSearchEmpty")}
-                </p>
-              ) : (
-                studioVisible.map((e) => (
-                  <div
-                    key={e.path}
-                    role="button"
-                    tabIndex={0}
-                    className="sfx-studio-pick"
-                    draggable
-                    onDragStart={(ev) => {
-                      const payload = JSON.stringify({
-                        path: e.path,
-                        label: padLabel(e),
-                      });
-                      ev.dataTransfer.setData(LIB_MIME, payload);
-                      ev.dataTransfer.setData("text/plain", payload);
-                      ev.dataTransfer.effectAllowed = "copy";
-                    }}
-                    onClick={() =>
-                      void addPath(e.path, padLabel(e), activeTrackId)
-                    }
-                    onKeyDown={(ev) => {
-                      if (ev.key === "Enter" || ev.key === " ") {
-                        ev.preventDefault();
-                        void addPath(e.path, padLabel(e), activeTrackId);
-                      }
-                    }}
-                  >
-                    <span className="sfx-studio-pick-name">{padLabel(e)}</span>
-                    <span className="sfx-studio-pick-cat muted">
-                      {studioKind === "bgm"
+            {studioKind === "fav" ? (
+              <div className="sfx-studio-search-seg" ref={favFilterRef}>
+                <button
+                  type="button"
+                  className={
+                    favFilterOpen
+                      ? "sfx-studio-search-seg-btn on"
+                      : "sfx-studio-search-seg-btn"
+                  }
+                  aria-haspopup="listbox"
+                  aria-expanded={favFilterOpen}
+                  aria-label={t("sfxStudioKindFav")}
+                  onClick={() => setFavFilterOpen((v) => !v)}
+                >
+                  <span>
+                    {studioFavFilter === "all"
+                      ? t("sfxStudioFavAll")
+                      : studioFavFilter === "bgm"
                         ? t("sfxStudioKindBgm")
-                        : e.category}
-                    </span>
+                        : t("sfxStudioKindSfx")}
+                  </span>
+                  <ChevronDown
+                    size={14}
+                    strokeWidth={2}
+                    absoluteStrokeWidth
+                    className={
+                      favFilterOpen
+                        ? "sfx-studio-search-seg-chev open"
+                        : "sfx-studio-search-seg-chev"
+                    }
+                  />
+                </button>
+                {favFilterOpen ? (
+                  <div
+                    className="sfx-studio-search-seg-menu"
+                    role="listbox"
+                    aria-label={t("sfxStudioKindFav")}
+                  >
+                    {(
+                      [
+                        ["all", "sfxStudioFavAll"],
+                        ["sfx", "sfxStudioKindSfx"],
+                        ["bgm", "sfxStudioKindBgm"],
+                      ] as const
+                    ).map(([id, key]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        role="option"
+                        aria-selected={studioFavFilter === id}
+                        className={
+                          studioFavFilter === id
+                            ? "sfx-studio-search-seg-opt on"
+                            : "sfx-studio-search-seg-opt"
+                        }
+                        onClick={() => {
+                          onStudioFavFilter(id);
+                          setFavFilterOpen(false);
+                        }}
+                      >
+                        {t(key)}
+                      </button>
+                    ))}
                   </div>
-                ))
-              )}
-            </div>
-          ) : null}
-        </div>
-        <div className="sfx-studio-top-actions">
-          <SfxVolumeButton
-            tone="sfx"
-            expandLeft
-            title={t("sfxSfxVolume")}
-            value={sfxVolume}
-            onChange={onSfxVolume}
-          />
-          <button
-            type="button"
-            className={
-              recording ? "sfx-tl-tool on sfx-rec-icon" : "sfx-tl-tool"
-            }
-            title={
-              recording
-                ? `${t("sfxRecording")} ${Math.floor(recElapsedMs / 1000)}s`
-                : t("sfxRecord")
-            }
-            onClick={onToggleRecord}
-          >
-            {recording ? (
-              <Square size={16} strokeWidth={1.75} absoluteStrokeWidth />
-            ) : (
-              <Mic size={16} strokeWidth={1.75} absoluteStrokeWidth />
-            )}
-            {recording ? (
-              <span
-                className="sfx-rec-meter icon"
+                ) : null}
+              </div>
+            ) : null}
+            <div className="sfx-studio-search-field">
+              <Search
+                className="sfx-studio-search-ico"
+                size={14}
+                strokeWidth={1.75}
+                absoluteStrokeWidth
                 aria-hidden
-                style={{
-                  ["--rec-peak" as string]: String(Math.min(1, recPeak * 2)),
+              />
+              <input
+                className="sfx-search sfx-studio-search"
+                type="search"
+                value={studioQuery}
+                placeholder={
+                  studioKind === "bgm"
+                    ? t("sfxStudioSearchBgm")
+                    : studioKind === "fav"
+                      ? t("sfxStudioSearchFav")
+                      : t("sfxStudioSearchSfx")
+                }
+                onChange={(e) => onStudioQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") onStudioQuery("");
                 }}
               />
-            ) : null}
-          </button>
+            </div>
+          </div>
         </div>
+
+        <div className="sfx-studio-lib-grid">
+          {studioVisible.length === 0 ? (
+            <p className="muted sfx-studio-lib-empty">{libEmptyText}</p>
+          ) : (
+            studioVisible.map((e) => {
+              const label = padLabel(e);
+              const fav = favoritedSet.has(e.path);
+              const on = libPick?.path === e.path;
+              const source =
+                studioKind === "bgm"
+                  ? t("sfxStudioKindBgm")
+                  : studioKind === "fav"
+                    ? favoritedSet.has(e.path)
+                      ? e.category || t("sfxStudioKindFav")
+                      : e.category
+                    : e.category;
+              const dur =
+                e.durationMs != null && e.durationMs > 0
+                  ? formatLibMs(e.durationMs)
+                  : "--:--";
+              return (
+                <div
+                  key={e.path}
+                  role="button"
+                  tabIndex={0}
+                  className={
+                    on ? "sfx-studio-lib-card on" : "sfx-studio-lib-card"
+                  }
+                  draggable
+                  onDragStart={(ev) => {
+                    const payload = JSON.stringify({
+                      path: e.path,
+                      label,
+                    });
+                    ev.dataTransfer.setData(LIB_MIME, payload);
+                    ev.dataTransfer.setData("text/plain", payload);
+                    ev.dataTransfer.effectAllowed = "copy";
+                  }}
+                  onClick={() => void playLibPreview(e)}
+                  onDoubleClick={() =>
+                    void addPath(
+                      e.path,
+                      label,
+                      activeTrackId,
+                      playheadRef.current,
+                    )
+                  }
+                  onKeyDown={(ev) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      void playLibPreview(e);
+                    }
+                  }}
+                >
+                  <div className="sfx-studio-lib-card-main">
+                    <span className="sfx-studio-lib-card-name" title={label}>
+                      {label}
+                    </span>
+                    <span className="sfx-studio-lib-card-meta">
+                      {source}
+                      <span className="sfx-studio-lib-dot">·</span>
+                      {dur}
+                    </span>
+                  </div>
+                  <div className="sfx-studio-lib-card-acts">
+                    <button
+                      type="button"
+                      className={
+                        fav
+                          ? "sfx-studio-lib-icon-btn on"
+                          : "sfx-studio-lib-icon-btn"
+                      }
+                      title={fav ? t("sfxStudioUnfav") : t("sfxStudioFav")}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        onToggleFavorite(e.path);
+                      }}
+                    >
+                      <Star
+                        size={14}
+                        strokeWidth={1.75}
+                        absoluteStrokeWidth
+                        fill={fav ? "currentColor" : "none"}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      className="sfx-studio-lib-icon-btn"
+                      title={t("sfxStudioAddClip")}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        void addPath(
+                          e.path,
+                          label,
+                          activeTrackId,
+                          playheadRef.current,
+                        );
+                      }}
+                    >
+                      <Plus size={15} strokeWidth={2} absoluteStrokeWidth />
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {libPick ? (
+          <div className="sfx-studio-lib-player">
+            <button
+              type="button"
+              className="sfx-studio-lib-play"
+              title={
+                libPlaying ? t("sfxStudioPause") : t("sfxPlayOnce")
+              }
+              onClick={() => toggleLibPlay()}
+            >
+              {libPlaying ? (
+                <Pause
+                  size={16}
+                  strokeWidth={0}
+                  absoluteStrokeWidth
+                  fill="currentColor"
+                />
+              ) : (
+                <Play
+                  size={16}
+                  strokeWidth={0}
+                  absoluteStrokeWidth
+                  fill="currentColor"
+                  style={{ marginLeft: 1 }}
+                />
+              )}
+            </button>
+            <div className="sfx-studio-lib-player-body">
+              <div className="sfx-studio-lib-player-title">
+                {padLabel(libPick)}
+                {libPick.category ? (
+                  <span className="sfx-studio-lib-player-src">
+                    {" "}
+                    - {libPick.category}
+                  </span>
+                ) : null}
+              </div>
+              <div className="sfx-studio-lib-player-row">
+                <span className="sfx-studio-lib-time">
+                  {formatLibMs(libPosMs)}
+                </span>
+                <span className="sfx-studio-lib-time muted">
+                  {libDurMs > 0 ? formatLibMs(libDurMs) : "--:--"}
+                </span>
+                <div
+                  className="sfx-studio-lib-seek"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={libDurMs || 1}
+                  aria-valuenow={Math.min(libPosMs, libDurMs || 0)}
+                >
+                  <div
+                    className="sfx-studio-lib-seek-fill"
+                    style={{ width: `${libProgress * 100}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="sfx-studio-lib-icon-btn sfx-studio-lib-close"
+              title={t("closePreview")}
+              onClick={() => closeLibPlayer()}
+            >
+              <X size={16} strokeWidth={1.75} absoluteStrokeWidth />
+            </button>
+          </div>
+        ) : null}
+      </section>
+
+      <div
+        className="sfx-studio-hsplit"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`${t("sfxStudioMaterials")} / ${t("sfxStudioSoundSettings")}`}
+        title="左右拖动调整宽度"
+        onPointerDown={startHSplit}
+      />
+
+      <aside
+        className="sfx-studio-inspector"
+        ref={inspElRef}
+        aria-label={t("sfxStudioSoundSettings")}
+        style={{ width: inspW, flex: `0 0 ${inspW}px` }}
+      >
+        <div className="sfx-insp-tabs" role="tablist">
+          {(
+            [
+              ["basic", "sfxStudioTabBasic"],
+              ["voice", "sfxStudioTabVoice"],
+              ["fx", "sfxStudioTabFx"],
+              ["speed", "sfxStudioTabSpeed"],
+            ] as const
+          ).map(([id, key]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={inspectorTab === id}
+              className={
+                inspectorTab === id ? "sfx-insp-tab on" : "sfx-insp-tab"
+              }
+              onClick={() => setInspectorTab(id)}
+            >
+              {t(key)}
+            </button>
+          ))}
+        </div>
+        {!selectedClip ? (
+          <p className="sfx-insp-empty muted">{t("sfxStudioInspEmpty")}</p>
+        ) : (
+          <div className="sfx-insp-body">
+            <div className="sfx-insp-head">
+              <div className="sfx-insp-clip-name" title={selectedClip.label}>
+                {selectedClip.label}
+              </div>
+              <button
+                type="button"
+                className="sfx-insp-preview-btn"
+                disabled={busy}
+                onClick={() => void previewSelectedClip()}
+              >
+                {t("sfxStudioPreviewClip")}
+              </button>
+            </div>
+
+            {inspectorTab === "basic" ? (
+              <div className="sfx-insp-fields">
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioClipVolume")}</span>
+                    <em>{fmtGainDb(selectedClip.gainDb)}</em>
+                  </div>
+                  <input
+                    type="range"
+                    min={VOL_MIN_DB}
+                    max={VOL_MAX_DB}
+                    step={0.5}
+                    value={selectedClip.gainDb}
+                    onPointerDown={() => pushUndo()}
+                    onChange={(e) =>
+                      patchSelected(
+                        { gainDb: clampGainDb(Number(e.target.value)) },
+                        false,
+                      )
+                    }
+                  />
+                </div>
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioFadeIn")}</span>
+                    <em>{selectedClip.fadeInMs}ms</em>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={2000}
+                    step={10}
+                    value={selectedClip.fadeInMs}
+                    onPointerDown={() => pushUndo()}
+                    onChange={(e) =>
+                      patchSelected(
+                        { fadeInMs: Math.max(0, Number(e.target.value)) },
+                        false,
+                      )
+                    }
+                  />
+                </div>
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioFadeOut")}</span>
+                    <em>{selectedClip.fadeOutMs}ms</em>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={2000}
+                    step={10}
+                    value={selectedClip.fadeOutMs}
+                    onPointerDown={() => pushUndo()}
+                    onChange={(e) =>
+                      patchSelected(
+                        { fadeOutMs: Math.max(0, Number(e.target.value)) },
+                        false,
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            {inspectorTab === "voice" ? (
+              <div className="sfx-insp-fields">
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioTabVoice")}</span>
+                  </div>
+                  <div className="sfx-insp-chips">
+                    {VOICE_PRESETS.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        className={
+                          Math.abs(
+                            (selectedClip.pitchSemitones ?? 0) - p.pitch,
+                          ) < 0.1
+                            ? "sfx-insp-chip on"
+                            : "sfx-insp-chip"
+                        }
+                        onClick={() =>
+                          patchSelected({ pitchSemitones: p.pitch }, true)
+                        }
+                      >
+                        {t(`sfxStudioVoice_${p.id}`)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioPitch")}</span>
+                    <em>
+                      {(selectedClip.pitchSemitones ?? 0) > 0 ? "+" : ""}
+                      {(selectedClip.pitchSemitones ?? 0).toFixed(1)}
+                    </em>
+                  </div>
+                  <input
+                    type="range"
+                    min={-12}
+                    max={12}
+                    step={0.5}
+                    value={selectedClip.pitchSemitones ?? 0}
+                    onPointerDown={() => pushUndo()}
+                    onChange={(e) =>
+                      patchSelected(
+                        { pitchSemitones: Number(e.target.value) },
+                        false,
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            {inspectorTab === "fx" ? (
+              <div className="sfx-insp-fields">
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioTabFx")}</span>
+                  </div>
+                  <div className="sfx-insp-chips">
+                    {(
+                      [
+                        ["none", { gainDb: 0, fadeInMs: 0, fadeOutMs: 0 }],
+                        ["soft", { gainDb: 0, fadeInMs: 250, fadeOutMs: 0 }],
+                        ["loud", { gainDb: 4, fadeInMs: 0, fadeOutMs: 0 }],
+                        ["quiet", { gainDb: -6, fadeInMs: 0, fadeOutMs: 0 }],
+                        ["tail", { gainDb: 0, fadeInMs: 0, fadeOutMs: 500 }],
+                      ] as const
+                    ).map(([id, partial]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        className="sfx-insp-chip"
+                        onClick={() => patchSelected({ ...partial }, true)}
+                      >
+                        {t(`sfxStudioFx_${id}`)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {inspectorTab === "speed" ? (
+              <div className="sfx-insp-fields">
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-field-top">
+                    <span>{t("sfxStudioSpeed")}</span>
+                    <em>{Number(selectedClip.speed ?? 1).toFixed(2)}x</em>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={2}
+                    step={0.05}
+                    value={Number(selectedClip.speed ?? 1)}
+                    onPointerDown={() => pushUndo()}
+                    onChange={(e) => {
+                      const v = Math.max(
+                        0.5,
+                        Math.min(2, Number(e.target.value) || 1),
+                      );
+                      patchSelected({ speed: v }, false, true);
+                    }}
+                  />
+                </div>
+                <div className="sfx-insp-field">
+                  <div className="sfx-insp-chips sfx-insp-chips-speed">
+                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className={
+                          Math.abs(Number(selectedClip.speed ?? 1) - s) < 0.02
+                            ? "sfx-insp-chip on"
+                            : "sfx-insp-chip"
+                        }
+                        onClick={() => {
+                          pushUndo();
+                          patchSelected({ speed: s }, false, true);
+                        }}
+                      >
+                        {s}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </aside>
       </div>
 
+      <div
+        className="sfx-studio-vsplit"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={`${t("sfxStudioMaterials")} / ${t("sfxStudioMontage")}`}
+        title="上下拖动调整高度"
+        onPointerDown={startVSplit}
+      />
+
+      {/* 下：混剪 */}
+      <div className="sfx-studio-lower" aria-label={t("sfxStudioMontage")}>
       <section
         className={
           dragOver ? "sfx-studio-card edit drop-target" : "sfx-studio-card edit"
@@ -1808,6 +3212,41 @@ export default function SfxStudioMontage({
               <Plus size={16} strokeWidth={1.75} absoluteStrokeWidth />
             </button>
             <span className="sfx-tl-sep" aria-hidden />
+            <SfxVolumeButton
+              tone="sfx"
+              expandLeft
+              title={t("sfxSfxVolume")}
+              value={sfxVolume}
+              onChange={onSfxVolume}
+            />
+            <button
+              type="button"
+              className={
+                recording ? "sfx-tl-tool on sfx-rec-icon" : "sfx-tl-tool"
+              }
+              title={
+                recording
+                  ? `${t("sfxRecording")} ${Math.floor(recElapsedMs / 1000)}s`
+                  : t("sfxRecord")
+              }
+              onClick={onToggleRecord}
+            >
+              {recording ? (
+                <Square size={16} strokeWidth={1.75} absoluteStrokeWidth />
+              ) : (
+                <Mic size={16} strokeWidth={1.75} absoluteStrokeWidth />
+              )}
+              {recording ? (
+                <span
+                  className="sfx-rec-meter icon"
+                  aria-hidden
+                  style={{
+                    ["--rec-peak" as string]: String(Math.min(1, recPeak * 2)),
+                  }}
+                />
+              ) : null}
+            </button>
+            <span className="sfx-tl-sep" aria-hidden />
             <button
               type="button"
               className={busy ? "sfx-tl-tool on" : "sfx-tl-tool"}
@@ -1904,8 +3343,25 @@ export default function SfxStudioMontage({
           </div>
         ) : null}
 
+        <p className="sfx-tl-keys muted" title={t("sfxStudioKeysHint")}>
+          {t("sfxStudioKeysLegend")}
+        </p>
+
         <div
           className={editMode === "blade" ? "sfx-tl blade" : "sfx-tl"}
+          tabIndex={0}
+          onPointerDownCapture={(e) => {
+            // 点时间线：离开搜索框，快捷键立刻可用
+            const ae = document.activeElement;
+            if (isTypingTarget(ae)) (ae as HTMLElement).blur?.();
+            // 捕获阶段：标尺/轨道/空白/片段 点击都先移动播放头
+            if (e.button !== 0) return;
+            const t = e.target as HTMLElement;
+            if (t.closest(".sfx-tl-side")) return;
+            if (!t.closest(".sfx-tl-scroll")) return;
+            if (previewRafRef.current) void stopPreview();
+            seekFromEvent(e.clientX, true);
+          }}
           onPointerMove={(e) => {
             onScrubMove(e);
             onPointerMove(e);
@@ -1979,22 +3435,30 @@ export default function SfxStudioMontage({
             </button>
           </div>
 
-          <div className="sfx-tl-scroll" ref={scrollRef}>
+          <div
+            className="sfx-tl-scroll"
+            ref={scrollRef}
+            onPointerDown={(e) => {
+              // 点到滚动区空白（含轨道下方空地）也移动红线并可拖 scrub
+              if (e.button !== 0) return;
+              if ((e.target as HTMLElement).closest(".sfx-tl-clip")) return;
+              startScrub(e);
+            }}
+          >
             <div className="sfx-tl-inner" style={{ width: timelineW }}>
               <div
                 ref={playheadLineRef}
                 className="sfx-tl-playhead"
                 aria-hidden
+              >
+                <span className="sfx-tl-playhead-head" />
+              </div>
+              <div
+                ref={snapGuideLineRef}
+                className="sfx-tl-snap-guide"
+                style={{ opacity: 0, left: 0 }}
+                aria-hidden
               />
-              {drag?.snapGuideMs != null ? (
-                <div
-                  className="sfx-tl-snap-guide"
-                  style={{
-                    left: (drag.snapGuideMs / 1000) * pxPerSec,
-                  }}
-                  aria-hidden
-                />
-              ) : null}
 
               <div
                 className="sfx-tl-ruler"
@@ -2033,10 +3497,11 @@ export default function SfxStudioMontage({
                       style={{ height: TRACK_H }}
                       onPointerDown={(e) => {
                         if (e.button !== 0) return;
+                        setActiveTrackId(tr.id);
+                        // 片段上：播放头已在 capture 里移过，这里只处理空白 lane
                         if ((e.target as HTMLElement).closest(".sfx-tl-clip")) {
                           return;
                         }
-                        setActiveTrackId(tr.id);
                         startScrub(e);
                       }}
                       onDragOver={(e) => {
@@ -2058,19 +3523,25 @@ export default function SfxStudioMontage({
                       onDrop={(e) => onLaneDrop(e, tr.id)}
                     >
                       {laneClips.map((c) => {
-                        const p = previewClip(c, drag);
+                        const dragging = drag?.id === c.id;
+                        // 拖动中：React 只钉死起点坐标，位移全交给 paintClipDragDom 的 transform
+                        // （避免 re-render 改 left 再叠加 transform → 双倍位移/发飘）
+                        const p = dragging
+                          ? {
+                              atMs: c.atMs,
+                              srcStartMs: c.srcStartMs,
+                              srcEndMs: c.srcEndMs,
+                              trackId: c.trackId,
+                            }
+                          : previewClip(c, null);
                         // DOM stays on original track while dragging (OCC)
                         if (c.trackId !== tr.id) return null;
-                        const dur = Math.max(MIN_CLIP_MS, p.srcEndMs - p.srcStartMs);
-                        const dragging = drag?.id === c.id;
+                        const dur = Math.max(
+                          MIN_CLIP_MS,
+                          p.srcEndMs - p.srcStartMs,
+                        );
                         const left = (p.atMs / 1000) * pxPerSec;
                         const width = Math.max(28, (dur / 1000) * pxPerSec);
-                        const dragOffsetY =
-                          dragging && drag.kind === "move"
-                            ? (trackIndex(drag.targetTrackId) -
-                                trackIndex(drag.baseTrackId)) *
-                              TRACK_H
-                            : 0;
                         const selected = selectedId === c.id || dragging;
                         const gainDb =
                           volDrag?.id === c.id ? volDrag.gainDb : c.gainDb;
@@ -2101,6 +3572,7 @@ export default function SfxStudioMontage({
                         return (
                           <div
                             key={c.id}
+                            data-clip-id={c.id}
                             className={
                               selected
                                 ? editMode === "blade"
@@ -2113,9 +3585,7 @@ export default function SfxStudioMontage({
                             style={{
                               left,
                               width,
-                              transform: dragOffsetY
-                                ? `translate3d(0, ${dragOffsetY}px, 0)`
-                                : undefined,
+                              // 拖动 transform 由 paintClipDragDom 独占，这里不要写
                               zIndex: elev ? 20 : undefined,
                             }}
                             title={`${c.label} · ${fmtTimecode(p.atMs)} · ${fmtGainDb(gainDb)}`}
@@ -2282,6 +3752,7 @@ export default function SfxStudioMontage({
         </div>
 
       </section>
+      </div>
 
       <ContextMenu menu={ctx} onClose={() => setCtx(null)} />
     </div>

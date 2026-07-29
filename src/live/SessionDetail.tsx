@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
@@ -59,6 +59,9 @@ type Props = {
   session: LiveSession;
   allSessions: LiveSession[];
   prev: LiveSession | null;
+  /** 下播后自动点亮「已复制」状态（复制已在外层完成） */
+  autoCopyReport?: boolean;
+  onAutoCopyDone?: () => void;
   labels: {
     back: string;
     core: string;
@@ -135,6 +138,8 @@ export default function SessionDetail({
   session,
   allSessions,
   prev,
+  autoCopyReport,
+  onAutoCopyDone,
   labels,
   onBack,
 }: Props) {
@@ -151,6 +156,15 @@ export default function SessionDetail({
   const [portraitTab, setPortraitTab] = useState<"all" | "paid" | "fans">("all");
   const [copyState, setCopyState] = useState<"idle" | "ok" | "fail">("idle");
   const [exportState, setExportState] = useState<"idle" | "ok" | "fail">("idle");
+
+  useEffect(() => {
+    if (!autoCopyReport) return;
+    setCopyState("ok");
+    onAutoCopyDone?.();
+    const id = window.setTimeout(() => setCopyState("idle"), 2200);
+    return () => window.clearTimeout(id);
+  }, [autoCopyReport, onAutoCopyDone, session.id]);
+
   const channels = useMemo(() => {
     const list = session.trafficChannels ?? [];
     return list

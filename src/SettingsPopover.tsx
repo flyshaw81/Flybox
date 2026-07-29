@@ -16,6 +16,10 @@ export type AppSettings = {
   startMinimized: boolean;
   accentColor: string;
   assistColor: string;
+  /** 工具包：图库入口（关=顶栏隐藏，数据保留） */
+  toolGallery: boolean;
+  /** 工具包：密码箱入口（关=顶栏隐藏，数据保留） */
+  toolPassbox: boolean;
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -24,6 +28,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   startMinimized: false,
   accentColor: DEFAULT_ACCENT,
   assistColor: DEFAULT_ASSIST,
+  toolGallery: true,
+  toolPassbox: true,
 };
 
 type Props = {
@@ -226,6 +232,23 @@ export default function SettingsPopover({
         </div>
 
         <div className="settings-section">
+          <div className="settings-section-label">{t("settingsToolbox")}</div>
+          <p className="settings-section-hint">{t("settingsToolboxHint")}</p>
+          <SwitchRow
+            label={t("settingsToolGallery")}
+            hint={t("settingsToolGalleryHint")}
+            on={settings.toolGallery}
+            onToggle={() => patch({ toolGallery: !settings.toolGallery })}
+          />
+          <SwitchRow
+            label={t("settingsToolPassbox")}
+            hint={t("settingsToolPassboxHint")}
+            on={settings.toolPassbox}
+            onToggle={() => patch({ toolPassbox: !settings.toolPassbox })}
+          />
+        </div>
+
+        <div className="settings-section">
           <div className="settings-section-label">{t("settingsLibraries")}</div>
           <PathRow
             label={t("settingsSfxLibrary")}
@@ -235,14 +258,16 @@ export default function SettingsPopover({
             changeLabel={t("changeFolder")}
             unsetLabel={t("settingsPathUnset")}
           />
-          <PathRow
-            label={t("settingsVaultPath")}
-            path={vaultPath}
-            onPick={onPickVault}
-            pickLabel={t("pickFolder")}
-            changeLabel={t("changeFolder")}
-            unsetLabel={t("settingsPathUnset")}
-          />
+          {settings.toolGallery ? (
+            <PathRow
+              label={t("settingsVaultPath")}
+              path={vaultPath}
+              onPick={onPickVault}
+              pickLabel={t("pickFolder")}
+              changeLabel={t("changeFolder")}
+              unsetLabel={t("settingsPathUnset")}
+            />
+          ) : null}
         </div>
 
         <div className="settings-section">

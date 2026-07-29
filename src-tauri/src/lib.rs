@@ -795,6 +795,8 @@ pub fn run() {
             sfx::sfx_resume_bgm,
             sfx::sfx_seek_bgm,
             sfx::sfx_play,
+            sfx::sfx_test_tone,
+            sfx::sfx_render_clip_fx,
             sfx::sfx_set_tagged_volume,
             sfx::sfx_play_bgm,
             sfx::sfx_bgm_status,

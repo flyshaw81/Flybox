@@ -62,7 +62,17 @@ export type ModuleChrome = {
   tools?: ReactNode;
 };
 
-const appWindow = getCurrentWindow();
+/** 避免热重载/非 Tauri 环境读不到 __TAURI_INTERNALS__.metadata 导致整页白屏 */
+function getAppWindow() {
+  try {
+    const internals = (window as unknown as { __TAURI_INTERNALS__?: { metadata?: unknown } })
+      .__TAURI_INTERNALS__;
+    if (!internals?.metadata) return null;
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
+}
 const ICO = 16;
 const ICO_WIN = 14;
 
@@ -117,6 +127,8 @@ const DEEP_DEFAULT_KEY = "deepScanDefault";
 const START_MIN_KEY = "startMinimized";
 const ACCENT_KEY = "accentColor";
 const ASSIST_KEY = "assistColor";
+const TOOL_GALLERY_KEY = "toolGallery";
+const TOOL_PASSBOX_KEY = "toolPassbox";
 /** 缩略图并发：图片可高一点；视频抽帧更重，单独限流 */
 const THUMB_CONCURRENCY = 6;
 const VIDEO_THUMB_CONCURRENCY = 2;
@@ -632,7 +644,7 @@ function WinControls() {
         type="button"
         className="win-btn"
         title={t("minimize")}
-        onClick={() => void appWindow.minimize()}
+        onClick={() => void getAppWindow()?.minimize()}
       >
         <Minus size={ICO_WIN} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
@@ -640,7 +652,7 @@ function WinControls() {
         type="button"
         className="win-btn"
         title={t("maximize")}
-        onClick={() => void appWindow.toggleMaximize()}
+        onClick={() => void getAppWindow()?.toggleMaximize()}
       >
         <Square size={12} strokeWidth={1.75} absoluteStrokeWidth />
       </button>
@@ -655,7 +667,7 @@ function WinControls() {
             } catch {
               /* engine may already be gone */
             }
-            await appWindow.close();
+            await getAppWindow()?.close();
           })();
         }}
       >
@@ -694,7 +706,7 @@ export default function App() {
   const bindContent = useCallback((node: HTMLElement | null) => {
     setScrollRoot(node);
   }, []);
-  /** 四大模块：图库 / 密码箱 / 记事本 / 音效 */
+  /** 模块：图库 / 密码箱 / 记事本 / 音效 / 分析 */
   type AppModule = "gallery" | "passbox" | "notepad" | "sfx" | "live";
   const [appModule, setAppModule] = useState<AppModule>("gallery");
   const [moduleChrome, setModuleChrome] = useState<ModuleChrome | null>(null);
@@ -702,12 +714,24 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
 
+  const toolGalleryOn = appSettings.toolGallery !== false;
+  const toolPassboxOn = appSettings.toolPassbox !== false;
+
   useEffect(() => {
     applyBrandColors(appSettings.accentColor, appSettings.assistColor);
   }, [appSettings.accentColor, appSettings.assistColor]);
   const [autostartOn, setAutostartOn] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [sfxLibraryPath, setSfxLibraryPath] = useState<string | null>(null);
+
+  const fallbackModule = useCallback(
+    (s: AppSettings): AppModule => {
+      if (s.toolGallery !== false) return "gallery";
+      if (s.toolPassbox !== false) return "passbox";
+      return "notepad";
+    },
+    [],
+  );
 
   const switchModule = useCallback(
     (m: AppModule) => {
@@ -721,6 +745,18 @@ export default function App() {
     },
     [appModule],
   );
+
+  /** 工具关掉时：只藏入口，若人还在该模块则跳到仍可用的模块 */
+  useEffect(() => {
+    if (appModule === "gallery" && !toolGalleryOn) {
+      setActiveIndex(null);
+      setModuleChrome(null);
+      setAppModule(toolPassboxOn ? "passbox" : "notepad");
+    } else if (appModule === "passbox" && !toolPassboxOn) {
+      setModuleChrome(null);
+      setAppModule(toolGalleryOn ? "gallery" : "notepad");
+    }
+  }, [appModule, toolGalleryOn, toolPassboxOn]);
 
   const loadImages = useCallback(async (root: string, recursive?: boolean) => {
     const gen = ++loadGen.current;
@@ -784,6 +820,8 @@ export default function App() {
         await store.set(START_MIN_KEY, normalized.startMinimized);
         await store.set(ACCENT_KEY, accent);
         await store.set(ASSIST_KEY, assist);
+        await store.set(TOOL_GALLERY_KEY, normalized.toolGallery !== false);
+        await store.set(TOOL_PASSBOX_KEY, normalized.toolPassbox !== false);
       } catch {
         /* ignore */
       }
@@ -896,16 +934,23 @@ export default function App() {
             /* ignore */
           }
         }
+        const toolGallery = (await store.get<boolean>(TOOL_GALLERY_KEY)) ?? true;
+        const toolPassbox = (await store.get<boolean>(TOOL_PASSBOX_KEY)) ?? true;
         setAppSettings({
           restoreVault: restore,
           deepScanDefault: deepDef,
           startMinimized: startMin,
           accentColor: accent,
           assistColor: assist,
+          toolGallery,
+          toolPassbox,
         });
         applyBrandColors(accent, assist);
         deepScanRef.current = deepDef;
         setDeepScan(deepDef);
+        if (!toolGallery) {
+          setAppModule(toolPassbox ? "passbox" : "notepad");
+        }
 
         try {
           setAutostartOn(await readAutostart());
@@ -915,7 +960,7 @@ export default function App() {
 
         if (startMin) {
           try {
-            await appWindow.minimize();
+            await getAppWindow()?.minimize();
           } catch {
             /* ignore */
           }
@@ -1190,11 +1235,13 @@ export default function App() {
         });
       }
       items.push({ id: "sep", separator: true });
-      items.push({
-        id: "passbox",
-        label: t("passbox"),
-        onClick: () => switchModule("passbox"),
-      });
+      if (toolPassboxOn) {
+        items.push({
+          id: "passbox",
+          label: t("passbox"),
+          onClick: () => switchModule("passbox"),
+        });
+      }
       items.push({
         id: "notepad",
         label: t("notepad"),
@@ -1212,7 +1259,7 @@ export default function App() {
       });
       openCtxMenu(e, items, setCtxMenu);
     },
-    [vault, loading, pickVault, loadImages, t, switchModule],
+    [vault, loading, pickVault, loadImages, t, switchModule, toolPassboxOn],
   );
 
   // 点缩略图放大 = 单图预览（灯箱）
@@ -1288,7 +1335,7 @@ export default function App() {
         <header
           className="topbar"
           data-tauri-drag-region
-          onDoubleClick={() => void appWindow.toggleMaximize()}
+          onDoubleClick={() => void getAppWindow()?.toggleMaximize()}
         >
           <div className="brand" data-tauri-drag-region>
             <BrandLogo onClick={toggleSettings} />
@@ -1310,22 +1357,26 @@ export default function App() {
 
   const moduleNav = (
     <nav className="module-nav" aria-label="modules">
-      <button
-        type="button"
-        className={appModule === "gallery" ? "icon-btn on" : "icon-btn"}
-        title={t("photos") === "photos" ? "Library" : "图库"}
-        onClick={() => switchModule("gallery")}
-      >
-        <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
-      <button
-        type="button"
-        className={appModule === "passbox" ? "icon-btn on" : "icon-btn"}
-        title={t("passbox")}
-        onClick={() => switchModule("passbox")}
-      >
-        <Lock size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
-      </button>
+      {toolGalleryOn ? (
+        <button
+          type="button"
+          className={appModule === "gallery" ? "icon-btn on" : "icon-btn"}
+          title={t("photos") === "photos" ? "Library" : "图库"}
+          onClick={() => switchModule("gallery")}
+        >
+          <ImageIcon size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+        </button>
+      ) : null}
+      {toolPassboxOn ? (
+        <button
+          type="button"
+          className={appModule === "passbox" ? "icon-btn on" : "icon-btn"}
+          title={t("passbox")}
+          onClick={() => switchModule("passbox")}
+        >
+          <Lock size={ICO} strokeWidth={1.75} absoluteStrokeWidth />
+        </button>
+      ) : null}
       <button
         type="button"
         className={appModule === "notepad" ? "icon-btn on" : "icon-btn"}
@@ -1467,7 +1518,7 @@ export default function App() {
       <header
         className="topbar"
         data-tauri-drag-region
-        onDoubleClick={() => void appWindow.toggleMaximize()}
+        onDoubleClick={() => void getAppWindow()?.toggleMaximize()}
       >
         <div className="brand" data-tauri-drag-region>
           {galleryViewerChrome && viewing ? (
@@ -1556,11 +1607,13 @@ export default function App() {
         </div>
       </header>
 
-      {appModule === "passbox" && (
+      {appModule === "passbox" && toolPassboxOn && (
         <div className="module-body">
           <Passbox
             embedded
-            onBackToGallery={() => switchModule("gallery")}
+            onBackToGallery={() =>
+              switchModule(toolGalleryOn ? "gallery" : fallbackModule(appSettings))
+            }
             onChromeChange={setModuleChrome}
           />
         </div>
@@ -1599,11 +1652,15 @@ export default function App() {
                   onClick: () => void pickVault(),
                 },
                 { id: "sep", separator: true },
-                {
-                  id: "passbox",
-                  label: t("passbox"),
-                  onClick: () => switchModule("passbox"),
-                },
+                ...(toolPassboxOn
+                  ? [
+                      {
+                        id: "passbox",
+                        label: t("passbox"),
+                        onClick: () => switchModule("passbox"),
+                      } as const,
+                    ]
+                  : []),
                 {
                   id: "notepad",
                   label: t("notepad"),

@@ -142,12 +142,26 @@ export default function FlyTooltip() {
 
   if (!tip) return null;
 
+  // 偏长或带换行的提示允许多行，但仍保持横向排版
+  const multiline =
+    tip.text.length > 22 || /[\n\r]/.test(tip.text) || tip.text.includes("·");
+
   return createPortal(
     <div
       ref={boxRef}
-      className={`fly-tip fly-tip-${tip.place}`}
+      className={[
+        "fly-tip",
+        `fly-tip-${tip.place}`,
+        multiline ? "fly-tip-multiline" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       role="tooltip"
-      style={{ left: tip.x, top: tip.y }}
+      style={{
+        left: tip.x,
+        top: tip.y,
+        writingMode: "horizontal-tb",
+      }}
     >
       {tip.text}
     </div>,

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "writer": "vite --config vite.writer.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.3.0",
@@ -32,6 +33,7 @@
     "ogl": "^1.0.11",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-router-dom": "^7.18.1",
     "wavesurfer.js": "^7.12.11"
   },
   "devDependencies": {

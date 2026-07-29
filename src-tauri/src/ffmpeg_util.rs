@@ -113,7 +113,7 @@ pub fn probe(path: &Path) -> Result<ProbeInfo, String> {
 }
 
 /// Export a time range to 44.1kHz stereo WAV via ffmpeg.
-/// Optional afade in/out and linear gain are applied on the *exported* clip.
+/// Optional afade in/out, linear gain, speed (atempo), pitch (asetrate) on the *exported* clip.
 pub fn export_range(
     src: &Path,
     start_ms: u64,
@@ -122,6 +122,22 @@ pub fn export_range(
     fade_in_ms: u64,
     fade_out_ms: u64,
     volume: f32,
+) -> Result<(), String> {
+    export_range_fx(
+        src, start_ms, end_ms, dest, fade_in_ms, fade_out_ms, volume, 1.0, 0.0,
+    )
+}
+
+pub fn export_range_fx(
+    src: &Path,
+    start_ms: u64,
+    end_ms: u64,
+    dest: &Path,
+    fade_in_ms: u64,
+    fade_out_ms: u64,
+    volume: f32,
+    speed: f32,
+    pitch_semitones: f32,
 ) -> Result<(), String> {
     let ffmpeg = find_tool("ffmpeg.exe")
         .or_else(|| find_tool("ffmpeg"))
@@ -145,14 +161,16 @@ pub fn export_range(
         dur_s,
         "-vn".into(),
     ];
-    let fi = fade_in_ms.min(dur_ms);
-    let fo = fade_out_ms.min(dur_ms);
-    let fo_use = if fi + fo > dur_ms {
-        dur_ms.saturating_sub(fi)
+    let speed = speed.clamp(0.25, 4.0);
+    let out_dur_ms = ((dur_ms as f64) / speed as f64).round().max(1.0) as u64;
+    let fi = fade_in_ms.min(out_dur_ms);
+    let fo = fade_out_ms.min(out_dur_ms);
+    let fo_use = if fi + fo > out_dur_ms {
+        out_dur_ms.saturating_sub(fi)
     } else {
         fo
     };
-    if let Some(f) = build_af_chain(fi, fo_use, dur_ms, volume) {
+    if let Some(f) = build_af_chain(fi, fo_use, out_dur_ms, volume, speed, pitch_semitones) {
         args.push("-af".into());
         args.push(f);
     }
@@ -178,29 +196,53 @@ pub fn export_range(
     Ok(())
 }
 
+fn push_atempo(parts: &mut Vec<String>, speed: f32) {
+    let mut s = speed.clamp(0.25, 4.0);
+    // atempo 单次只能 0.5～2.0，链式拼接
+    while s > 2.0 + 1e-4 {
+        parts.push("atempo=2.0".into());
+        s /= 2.0;
+    }
+    while s < 0.5 - 1e-4 {
+        parts.push("atempo=0.5".into());
+        s /= 0.5;
+    }
+    if (s - 1.0).abs() > 0.01 {
+        parts.push(format!("atempo={s:.4}"));
+    }
+}
+
 fn build_af_chain(
     fade_in_ms: u64,
     fade_out_ms: u64,
-    dur_ms: u64,
+    out_dur_ms: u64,
     volume: f32,
+    speed: f32,
+    pitch_semitones: f32,
 ) -> Option<String> {
     let mut parts = Vec::new();
     let vol = volume.clamp(0.0, 8.0);
     if (vol - 1.0).abs() > 0.001 {
         parts.push(format!("volume={vol:.4}"));
     }
+    // 变调（简易）：asetrate + aresample，会连带时长微变，再 atempo 压回
+    if pitch_semitones.abs() > 0.05 {
+        let rate = 44100.0 * (2f64).powf(pitch_semitones as f64 / 12.0);
+        parts.push(format!("asetrate={rate:.2},aresample=44100"));
+    }
+    push_atempo(&mut parts, speed);
     if fade_in_ms > 0 {
         parts.push(format!(
             "afade=t=in:st=0:d={:.3}",
             fade_in_ms as f64 / 1000.0
         ));
     }
-    if fade_out_ms > 0 && dur_ms > fade_out_ms {
+    if fade_out_ms > 0 && out_dur_ms > fade_out_ms {
         let d = fade_out_ms as f64 / 1000.0;
-        let st = (dur_ms - fade_out_ms) as f64 / 1000.0;
+        let st = (out_dur_ms - fade_out_ms) as f64 / 1000.0;
         parts.push(format!("afade=t=out:st={st:.3}:d={d:.3}"));
     } else if fade_out_ms > 0 {
-        let d = fade_out_ms.min(dur_ms) as f64 / 1000.0;
+        let d = fade_out_ms.min(out_dur_ms) as f64 / 1000.0;
         parts.push(format!("afade=t=out:st=0:d={d:.3}"));
     }
     if parts.is_empty() {
@@ -384,9 +426,10 @@ fn peaks_cache_file(path: &Path, buckets: usize) -> Option<PathBuf> {
     )
 }
 
-/// Generate ~64 peak samples (0..1) for waveform UI via ffmpeg pcm extract (cached).
+/// Generate peak samples (0..1) for waveform UI via ffmpeg (cached on disk).
+/// Downsamples to 8kHz mono so long clips stay fast; buckets up to 4k for zoom.
 pub fn waveform_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, String> {
-    let buckets = buckets.clamp(16, 256);
+    let buckets = buckets.clamp(16, 4096);
     if let Some(cache) = peaks_cache_file(path, buckets) {
         if let Ok(raw) = std::fs::read_to_string(&cache) {
             if let Ok(peaks) = serde_json::from_str::<Vec<f32>>(&raw) {
@@ -399,6 +442,7 @@ pub fn waveform_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, String> {
     let ffmpeg = find_tool("ffmpeg.exe")
         .or_else(|| find_tool("ffmpeg"))
         .ok_or_else(|| "找不到 ffmpeg.exe".to_string())?;
+    // 8kHz mono：包络够用，比全采样解码快一个数量级
     let out = tool_cmd(ffmpeg)
         .args([
             "-v",
@@ -407,6 +451,8 @@ pub fn waveform_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, String> {
             path.to_string_lossy().as_ref(),
             "-ac",
             "1",
+            "-ar",
+            "8000",
             "-f",
             "f32le",
             "-acodec",
@@ -418,25 +464,44 @@ pub fn waveform_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, String> {
     if !out.status.success() && out.stdout.is_empty() {
         return Err("无法提取波形".into());
     }
-    let samples: Vec<f32> = out
-        .stdout
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).abs())
-        .collect();
-    if samples.is_empty() {
+    let bytes = out.stdout;
+    let n = bytes.len() / 4;
+    if n == 0 {
         return Ok(vec![0.0; buckets]);
     }
-    let chunk = (samples.len() / buckets).max(1);
+    let chunk = (n / buckets).max(1);
+    // 块内再抽样，避免超长文件在 Rust 里逐样本扫
+    let stride = (chunk / 64).max(1);
     let mut peaks = Vec::with_capacity(buckets);
+    let mut global_peak = 0.0001f32;
     for i in 0..buckets {
         let start = i * chunk;
-        if start >= samples.len() {
+        if start >= n {
             peaks.push(0.0);
             continue;
         }
-        let end = (start + chunk).min(samples.len());
-        let p = samples[start..end].iter().cloned().fold(0.0f32, f32::max);
-        peaks.push(p.min(1.0));
+        let end = (start + chunk).min(n);
+        let mut p = 0.0f32;
+        let mut j = start;
+        while j < end {
+            let o = j * 4;
+            if o + 4 > bytes.len() {
+                break;
+            }
+            let v = f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]).abs();
+            if v > p {
+                p = v;
+            }
+            j += stride;
+        }
+        if p > global_peak {
+            global_peak = p;
+        }
+        peaks.push(p);
+    }
+    let inv = 1.0 / global_peak;
+    for p in &mut peaks {
+        *p = (*p * inv).min(1.0);
     }
     if let Some(cache) = peaks_cache_file(path, buckets) {
         if let Some(parent) = cache.parent() {
