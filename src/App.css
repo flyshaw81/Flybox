@@ -3457,6 +3457,122 @@ html.is-resizing .darkveil-canvas {
   justify-content: flex-start;
 }
 
+/*
+ * BGM 舞台「Speed/Pitch/Fade 条」
+ * - 深色：深玻璃条 + 浅字；数值钮用柔和浅底，不要死白块
+ * - 浅色：见下方 [data-theme=light]
+ */
+.sfx-player.bgm .sfx-player-extras {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+}
+
+.sfx-player.bgm .sfx-menu-select-label {
+  color: rgba(255, 255, 255, 0.72);
+  font-weight: 650;
+}
+
+.sfx-player.bgm .sfx-menu-select-btn {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.95);
+  box-shadow: none;
+}
+
+.sfx-player.bgm .sfx-menu-select-btn:hover,
+.sfx-player.bgm .sfx-menu-select-btn.on {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.sfx-player.bgm .sfx-menu-select-btn svg {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.sfx-player.bgm .sfx-menu-select-btn.on svg {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.sfx-player.bgm .sfx-vol-chip {
+  color: rgba(255, 255, 255, 0.88);
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+}
+
+.sfx-player.bgm .sfx-vol-chip:hover,
+.sfx-player.bgm .sfx-vol-chip.on {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.sfx-player.bgm .sfx-seek-time {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.sfx-player.bgm .sfx-player-controls.deck .sfx-player-btn.ghost {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.sfx-player.bgm .sfx-player-controls.deck .sfx-player-btn.ghost:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.sfx-player.bgm .sfx-player-controls.deck .sfx-player-btn.ghost.on {
+  color: #fff;
+}
+
+/* 浅色：红框组件 = 浅底 + 深字，不要深灰胶囊 */
+[data-theme="light"] .sfx-player.bgm .sfx-player-extras {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-menu-select-label {
+  color: #4b5563;
+  font-weight: 650;
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-menu-select-btn {
+  background: #f3f4f7;
+  border: 1px solid #e5e7eb;
+  color: #111827;
+  box-shadow: none;
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-menu-select-btn:hover,
+[data-theme="light"] .sfx-player.bgm .sfx-menu-select-btn.on {
+  background: #e9ebf0;
+  border-color: #d1d5db;
+  color: #111827;
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-menu-select-btn svg {
+  color: #6b7280;
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-menu-select-btn.on svg {
+  color: #4b5563;
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-vol-chip {
+  color: #374151;
+}
+
+[data-theme="light"] .sfx-player.bgm .sfx-vol-chip:hover,
+[data-theme="light"] .sfx-player.bgm .sfx-vol-chip.on {
+  color: #111827;
+  background: #eef0f4;
+}
+
 .sfx-vol-pop {
   position: relative;
   display: inline-flex;
