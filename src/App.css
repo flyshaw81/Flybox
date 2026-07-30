@@ -8636,6 +8636,67 @@ html.is-resizing .darkveil-canvas {
   color: color-mix(in srgb, #ff8a8a 65%, var(--text));
 }
 
+/* Beauty controls (MediaPipe / CPU) */
+.vcam-beauty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.vcam-beauty-toggle {
+  appearance: none;
+  align-self: flex-start;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 0;
+  background: color-mix(in srgb, var(--menu-hover) 80%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.vcam-beauty-toggle.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.vcam-beauty-engine {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.55;
+}
+.vcam-beauty-sliders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--bg-elev);
+}
+.vcam-beauty-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 140px;
+  flex: 1 1 140px;
+  font-size: 12px;
+  color: var(--soft);
+  font-weight: 600;
+}
+.vcam-beauty-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 80px;
+  accent-color: var(--accent);
+}
+[data-theme="light"] .vcam-beauty-sliders {
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(20, 24, 36, 0.06);
+}
+
 /* Single soft toolbar — solid fill, no double borders */
 .vcam-toolbar {
   display: flex;

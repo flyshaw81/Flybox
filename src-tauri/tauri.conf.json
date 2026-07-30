@@ -33,7 +33,15 @@
       "vendor/bass/*",
       "vendor/ffmpeg/ffmpeg.exe",
       "vendor/ffmpeg/ffprobe.exe",
-      "resources/vcam/flybox-virtualcam-module64.dll"
+      "resources/vcam/flybox-virtualcam-module64.dll",
+      "resources/beauty/beauty_worker.py",
+      "resources/beauty/beauty_face_worker.py",
+      "resources/beauty/face_landmarker.task",
+      "resources/beauty/gpupixel/gpupixel_worker.exe",
+      "resources/beauty/gpupixel/gpupixel.dll",
+      "resources/beauty/gpupixel/glfw3.dll",
+      "resources/beauty/gpupixel/models/*",
+      "resources/beauty/gpupixel/res/*"
     ],
     "windows": {
       "nsis": {

@@ -18,6 +18,11 @@ import {
   Square,
 } from "lucide-react";
 import { useI18n } from "../i18n";
+import {
+  getBeautyEngineHint,
+  getFaceLandmarker,
+  paintBeautyFrame,
+} from "./beautyCanvas";
 
 type ModuleChrome = {
   title?: string;
@@ -153,6 +158,13 @@ type VcamPreview = {
   dataUrl: string;
 };
 
+type BeautyParams = {
+  enabled: boolean;
+  smooth: number;
+  whiten: number;
+  slim: number;
+};
+
 type Props = {
   embedded?: boolean;
   onChromeChange?: (chrome: ModuleChrome | null) => void;
@@ -224,6 +236,15 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
     }
   });
   const [busy, setBusy] = useState(false);
+  const [beauty, setBeauty] = useState<BeautyParams>({
+    enabled: false,
+    smooth: 0.35,
+    whiten: 0.35,
+    slim: 0.0,
+  });
+  const beautyRef = useRef(beauty);
+  beautyRef.current = beauty;
+  const [beautyHint, setBeautyHint] = useState("");
 
   function currentCanvas(): { w: number; h: number; fps: number } {
     const tier = QUALITY_TIERS.find((q) => q.id === qualityId) ?? QUALITY_TIERS[1];
@@ -532,7 +553,30 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
   useEffect(() => {
     void refresh();
     void loadSources();
+    void (async () => {
+      try {
+        const p = await invoke<BeautyParams>("beauty_get");
+        setBeauty(p);
+      } catch {
+        /* ignore */
+      }
+    })();
   }, [refresh, loadSources]);
+
+  async function applyBeauty(next: BeautyParams) {
+    setBeauty(next);
+    try {
+      localStorage.setItem("flybox.vcam.beauty", JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+    try {
+      const p = await invoke<BeautyParams>("beauty_set", { params: next });
+      setBeauty(p);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
 
   useEffect(() => {
     const id = window.setInterval(
@@ -582,8 +626,8 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       };
     }
 
-    // —— Running: Rust writes SHM at full rate. Preview = read virtual device
-    // (same as companion) OR backend JPEG thumbnail as fallback. ——
+    // —— Running: Rust writes SHM at full rate. Preview = backend JPEG (shows beauty).
+    // Prefer backend thumbs when beauty is on so UI matches virtual cam pipeline. ——
     if (running) {
       releaseCamera();
       setPreviewKind("canvas");
@@ -591,6 +635,8 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
 
       const img = new Image();
       let usingVideo = false;
+      // Beauty path must show processed SHM thumbs, not raw local camera.
+      const preferBackendOnly = beauty.enabled;
 
       const paintBackendThumb = async () => {
         if (!alive() || usingVideo || document.hidden) return;
@@ -668,20 +714,22 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       void paintBackendThumb();
       intervalRef.current = window.setInterval(() => {
         if (!usingVideo) void paintBackendThumb();
-      }, 120);
+      }, preferBackendOnly ? 80 : 120);
 
-      void (async () => {
-        for (let i = 0; i < 6 && alive() && !usingVideo; i++) {
-          if (await tryOpenVirtualCam()) {
-            if (intervalRef.current) {
-              window.clearInterval(intervalRef.current);
-              intervalRef.current = 0;
+      if (!preferBackendOnly) {
+        void (async () => {
+          for (let i = 0; i < 6 && alive() && !usingVideo; i++) {
+            if (await tryOpenVirtualCam()) {
+              if (intervalRef.current) {
+                window.clearInterval(intervalRef.current);
+                intervalRef.current = 0;
+              }
+              return;
             }
-            return;
+            await new Promise((r) => window.setTimeout(r, 250));
           }
-          await new Promise((r) => window.setTimeout(r, 250));
-        }
-      })();
+        })();
+      }
 
       return () => {
         if (intervalRef.current) {
@@ -722,6 +770,47 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
           releaseCamera();
           return;
         }
+        // Beauty ON: MediaPipe face lock + face-only composite (not full-screen filter)
+        if (beauty.enabled) {
+          setPreviewKind("canvas");
+          setBeautyHint("加载人脸模型…");
+          void getFaceLandmarker().then((lm) => {
+            if (!alive()) return;
+            if (!lm) setBeautyHint("人脸模型失败");
+          });
+          void invoke("beauty_warmup").catch(() => undefined);
+          let lastTs = 0;
+          let busy = false;
+          let lastHint = "";
+          const loop = (ts: number) => {
+            if (!alive()) return;
+            rafRef.current = requestAnimationFrame(loop);
+            if (document.hidden || busy) return;
+            // ~15–20 fps: face detect + beauty + mask composite
+            if (ts - lastTs < 50) return;
+            lastTs = ts;
+            const video = videoRef.current;
+            const canvas = canvasRef.current;
+            if (!video || !canvas || video.videoWidth < 2) return;
+            busy = true;
+            void paintBeautyFrame(video, canvas, beautyRef.current, 960, ts)
+              .then((r) => {
+                if (!alive() || !beautyRef.current.enabled) return;
+                if (!r.ready) return;
+                const h = getBeautyEngineHint() || "人脸美颜";
+                if (h !== lastHint) {
+                  lastHint = h;
+                  setBeautyHint(h);
+                }
+              })
+              .finally(() => {
+                busy = false;
+              });
+          };
+          rafRef.current = requestAnimationFrame(loop);
+        } else {
+          setBeautyHint("");
+        }
       } catch {
         if (!alive()) return;
         setPreviewKind("canvas");
@@ -745,13 +834,14 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
       if (intervalRef.current) {
+        window.clearTimeout(intervalRef.current);
         window.clearInterval(intervalRef.current);
         intervalRef.current = 0;
       }
       // Don't release camera here if a newer gen already re-opened it —
       // gen bump handles invalidation; release only when leaving module.
     };
-  }, [status?.running, status?.source, selected, busy, t]);
+  }, [status?.running, status?.source, selected, busy, t, beauty.enabled]);
 
   // On unmount: free camera
   useEffect(() => {
@@ -1250,6 +1340,58 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
           </div>
         </div>
         {err ? <p className="vcam-toast err">{err}</p> : null}
+      </div>
+
+      <div className="vcam-beauty">
+        <button
+          type="button"
+          className={`vcam-beauty-toggle ${beauty.enabled ? "on" : ""}`}
+          onClick={() =>
+            void applyBeauty({ ...beauty, enabled: !beauty.enabled })
+          }
+        >
+          {t("beautyTitle")} ·{" "}
+          {beauty.enabled ? t("beautyOn") : t("beautyOff")}
+          {beauty.enabled ? (
+            <span className="vcam-beauty-engine">
+              {beautyHint || "人脸美颜"}
+            </span>
+          ) : null}
+        </button>
+        {beauty.enabled ? (
+          <div className="vcam-beauty-sliders">
+            <label className="vcam-beauty-row">
+              <span>{t("beautySmooth")}</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(beauty.smooth * 100)}
+                onChange={(e) =>
+                  void applyBeauty({
+                    ...beauty,
+                    smooth: Number(e.target.value) / 100,
+                  })
+                }
+              />
+            </label>
+            <label className="vcam-beauty-row">
+              <span>{t("beautyWhiten")}</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(beauty.whiten * 100)}
+                onChange={(e) =>
+                  void applyBeauty({
+                    ...beauty,
+                    whiten: Number(e.target.value) / 100,
+                  })
+                }
+              />
+            </label>
+          </div>
+        ) : null}
       </div>
     </div>
   );

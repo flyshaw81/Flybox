@@ -1,4 +1,5 @@
 mod bass_ffi;
+mod beauty;
 mod ffmpeg_util;
 mod live;
 mod midi_mtc;
@@ -844,6 +845,12 @@ pub fn run() {
             vcam::vcam_push_jpeg,
             vcam::vcam_stop,
             vcam::vcam_reconfigure,
+            beauty::beauty_get,
+            beauty::beauty_set,
+            beauty::beauty_status,
+            beauty::beauty_warmup,
+            beauty::beauty_process_jpeg,
+            beauty::beauty_process_rgba,
             midi_mtc::midi_list_ports,
             midi_mtc::midi_status,
             midi_mtc::midi_configure,

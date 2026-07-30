@@ -1484,9 +1484,18 @@ fn pump_camera_to_shm(
                  raw: &[u8],
                  frame_i: u64|
    -> u64 {
+    // Beauty on capture size first (MediaPipe / CPU), then scale to canvas.
+    let beautified = {
+      let b = crate::beauty::global();
+      if b.get().active() {
+        b.process_nv12(raw, cap_spec.w, cap_spec.h)
+      } else {
+        raw.to_vec()
+      }
+    };
     let out = if need_scale {
       scale_nv12_fit(
-        raw,
+        &beautified,
         cap_spec.w,
         cap_spec.h,
         out_spec.w,
@@ -1494,12 +1503,18 @@ fn pump_camera_to_shm(
         fit,
       )
     } else {
-      raw.to_vec()
+      beautified
     };
     let ts = frame_i.saturating_mul(out_spec.interval);
     writer.write_nv12(&out, ts);
     let n = frames.fetch_add(1, Ordering::Relaxed) + 1;
-    if n % 10 == 0 {
+    // When beauty is on, refresh UI preview more often so sliders feel live.
+    let every = if crate::beauty::global().get().active() {
+      3u64
+    } else {
+      10u64
+    };
+    if n % every == 0 {
       let _ = preview_tx.try_send(out);
     }
     frame_i + 1

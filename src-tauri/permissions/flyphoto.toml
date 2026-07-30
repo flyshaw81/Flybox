@@ -412,3 +412,33 @@ commands.allow = ["vcam_stop"]
 identifier = "allow-vcam-reconfigure"
 description = "Allow hot-switching virtual camera resolution/fps while running"
 commands.allow = ["vcam_reconfigure"]
+
+[[permission]]
+identifier = "allow-beauty-get"
+description = "Allow reading beauty parameters"
+commands.allow = ["beauty_get"]
+
+[[permission]]
+identifier = "allow-beauty-set"
+description = "Allow updating beauty parameters"
+commands.allow = ["beauty_set"]
+
+[[permission]]
+identifier = "allow-beauty-status"
+description = "Allow querying beauty engine / MediaPipe readiness"
+commands.allow = ["beauty_status"]
+
+[[permission]]
+identifier = "allow-beauty-process-jpeg"
+description = "Allow processing a preview JPEG with beauty"
+commands.allow = ["beauty_process_jpeg"]
+
+[[permission]]
+identifier = "allow-beauty-process-rgba"
+description = "Allow processing a preview RGBA frame with beauty (lossless path)"
+commands.allow = ["beauty_process_rgba"]
+
+[[permission]]
+identifier = "allow-beauty-warmup"
+description = "Allow pre-warming beauty engine"
+commands.allow = ["beauty_warmup"]
