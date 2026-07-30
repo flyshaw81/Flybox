@@ -93,15 +93,32 @@ VCamFilter::VCamFilter() : OutputFilter()
 		new_obs_interval = def_interval;
 	}
 
-	/* Common live presets (NV12 primary; I420/YUY2 for picky hosts). */
+	/* Common live presets (NV12 primary; I420/YUY2 for picky hosts).
+	   Include 16:9 / 4:3 / 9:16 / 1:1 like OBS canvas choices. */
 	struct {
 		uint32_t cx, cy;
 		uint64_t interval;
 	} presets[] = {
-		{1920, 1080, 333333ULL}, /* 1080p30 */
-		{1920, 1080, 166666ULL}, /* 1080p60 */
-		{1280, 720, 333333ULL},  /* 720p30 */
-		{1280, 720, 166666ULL},  /* 720p60 */
+		/* 16:9 */
+		{1280, 720, 333333ULL},
+		{1920, 1080, 333333ULL},
+		{2560, 1440, 333333ULL},
+		{3840, 2160, 333333ULL},
+		/* 4:3 */
+		{960, 720, 333333ULL},
+		{1440, 1080, 333333ULL},
+		{1920, 1440, 333333ULL},
+		{2880, 2160, 333333ULL},
+		/* 9:16 */
+		{720, 1280, 333333ULL},
+		{1080, 1920, 333333ULL},
+		{1440, 2560, 333333ULL},
+		{2160, 3840, 333333ULL},
+		/* 1:1 */
+		{720, 720, 333333ULL},
+		{1080, 1080, 333333ULL},
+		{1440, 1440, 333333ULL},
+		{2160, 2160, 333333ULL},
 		{new_obs_cx, new_obs_cy, new_obs_interval},
 	};
 

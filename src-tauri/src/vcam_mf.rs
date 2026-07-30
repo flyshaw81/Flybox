@@ -87,8 +87,28 @@ pub fn match_device_name<'a>(wanted: &str, candidates: &'a [String]) -> Option<&
   best
 }
 
+/// One physical camera + highest native mode we could enumerate.
+#[derive(Debug, Clone)]
+pub struct CamDeviceInfo {
+  pub name: String,
+  /// Max width among native media types (0 = unknown).
+  pub max_w: u32,
+  /// Max height among native media types (0 = unknown).
+  pub max_h: u32,
+}
+
 /// Friendly names of video devices (excludes FLYBOX virtual camera).
 pub fn list_video_device_names() -> Result<Vec<String>, String> {
+  Ok(
+    list_video_devices_with_caps()?
+      .into_iter()
+      .map(|d| d.name)
+      .collect(),
+  )
+}
+
+/// List cameras and probe each device's **maximum native resolution** (product: adapt to hardware).
+pub fn list_video_devices_with_caps() -> Result<Vec<CamDeviceInfo>, String> {
   let _guard = start_mf()?;
   unsafe {
     let attrs = vidcap_attrs()?;
@@ -99,20 +119,102 @@ pub fn list_video_device_names() -> Result<Vec<String>, String> {
     if devices.is_null() || count == 0 {
       return Ok(Vec::new());
     }
-    let mut names = Vec::new();
+    let mut out = Vec::new();
     let slice = std::slice::from_raw_parts_mut(devices, count as usize);
     for slot in slice.iter_mut() {
       if let Some(act) = slot.take() {
         if let Ok(name) = activate_name(&act) {
           if !name.eq_ignore_ascii_case("FLYBOX Camera") {
-            names.push(name);
+            let (max_w, max_h) = probe_activate_max_size(&act).unwrap_or((0, 0));
+            out.push(CamDeviceInfo {
+              name,
+              max_w,
+              max_h,
+            });
           }
         }
         drop(act);
       }
     }
     CoTaskMemFree(Some(devices as *const _));
-    Ok(names)
+    Ok(out)
+  }
+}
+
+/// Walk native media types; return the mode with the most pixels.
+unsafe fn probe_activate_max_size(activate: &IMFActivate) -> Result<(u32, u32), String> {
+  let source = activate
+    .ActivateObject::<windows::Win32::Media::MediaFoundation::IMFMediaSource>()
+    .map_err(|e| format!("ActivateObject: {e}"))?;
+  let mut reader_attrs: Option<IMFAttributes> = None;
+  let _ = MFCreateAttributes(&mut reader_attrs, 1);
+  if let Some(ref a) = reader_attrs {
+    let _ = a.SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, 0);
+  }
+  let reader = MFCreateSourceReaderFromMediaSource(&source, reader_attrs.as_ref())
+    .map_err(|e| format!("SourceReader: {e}"))?;
+  let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+  let mut best_w = 0u32;
+  let mut best_h = 0u32;
+  let mut best_pix = 0u64;
+  for i in 0..64u32 {
+    let mt = match reader.GetNativeMediaType(stream, i) {
+      Ok(m) => m,
+      Err(_) => break,
+    };
+    // Prefer video types; skip if no frame size.
+    let sz = match mt.GetUINT64(&MF_MT_FRAME_SIZE) {
+      Ok(v) => v,
+      Err(_) => continue,
+    };
+    let w = (sz >> 32) as u32;
+    let h = sz as u32;
+    if w < 160 || h < 120 {
+      continue;
+    }
+    let pix = u64::from(w) * u64::from(h);
+    if pix > best_pix {
+      best_pix = pix;
+      best_w = w;
+      best_h = h;
+    }
+  }
+  if best_w == 0 || best_h == 0 {
+    return Err("无可用分辨率".into());
+  }
+  Ok((best_w, best_h))
+}
+
+/// Probe a single device by friendly name (for start path clamp).
+pub fn probe_device_max_size(device_name: &str) -> Result<(u32, u32), String> {
+  let _guard = start_mf()?;
+  unsafe {
+    let attrs = vidcap_attrs()?;
+    let mut devices: *mut Option<IMFActivate> = std::ptr::null_mut();
+    let mut count = 0u32;
+    MFEnumDeviceSources(&attrs, &mut devices, &mut count)
+      .map_err(|e| format!("枚举摄像头失败: {e}"))?;
+    if devices.is_null() || count == 0 {
+      return Err("未找到摄像头".into());
+    }
+    let slice = std::slice::from_raw_parts_mut(devices, count as usize);
+    let mut names = Vec::new();
+    let mut activates: Vec<IMFActivate> = Vec::new();
+    for slot in slice.iter_mut() {
+      if let Some(act) = slot.take() {
+        let name = activate_name(&act).unwrap_or_default();
+        names.push(name);
+        activates.push(act);
+      }
+    }
+    CoTaskMemFree(Some(devices as *const _));
+    let pick = match_device_name(device_name, &names)
+      .ok_or_else(|| format!("找不到摄像头「{device_name}」"))?
+      .to_string();
+    let idx = names.iter().position(|n| n == &pick).unwrap();
+    let activate = activates.swap_remove(idx);
+    drop(activates);
+    probe_activate_max_size(&activate)
   }
 }
 
@@ -175,19 +277,20 @@ impl MfCamera {
       let reader = MFCreateSourceReaderFromMediaSource(&source, reader_attrs.as_ref())
         .map_err(|e| format!("创建 SourceReader 失败: {e}"))?;
 
-      set_nv12_type(&reader, cx, cy, fps)?;
-      let stride = current_stride(&reader, cx)?;
+      let (act_cx, act_cy) = set_nv12_type(&reader, cx, cy, fps)?;
+      let stride = current_stride(&reader, act_cx)?;
 
-      let frame_size = (cx as usize) * (cy as usize) * 3 / 2;
+      let frame_size = (act_cx as usize) * (act_cy as usize) * 3 / 2;
       let mut first = vec![0u8; frame_size];
       let mut got = false;
-      for _ in 0..40 {
-        match read_nv12_frame(&reader, cx, cy, stride, &mut first) {
+      // Tight loop for first frame — long sleeps made start feel multi-second.
+      for _ in 0..60 {
+        match read_nv12_frame(&reader, act_cx, act_cy, stride, &mut first) {
           Ok(()) => {
             got = true;
             break;
           }
-          Err(_) => std::thread::sleep(Duration::from_millis(25)),
+          Err(_) => std::thread::sleep(Duration::from_millis(8)),
         }
       }
       if !got {
@@ -199,8 +302,8 @@ impl MfCamera {
       Ok(Self {
         _guard: guard,
         reader,
-        cx,
-        cy,
+        cx: act_cx,
+        cy: act_cy,
         stride,
         frame_size,
         first_frame: first,
@@ -213,25 +316,25 @@ impl MfCamera {
   }
 }
 
+/// Request NV12 at the **camera's native size** (never force canvas size).
+/// Forcing 1:1/9:16 on a 16:9 webcam makes MF stretch people — do fit in software instead.
+/// Returns negotiated (cx, cy). `prefer_*` / `fps` are soft hints only (fps optional).
 unsafe fn set_nv12_type(
   reader: &IMFSourceReader,
-  cx: u32,
-  cy: u32,
+  _prefer_cx: u32,
+  _prefer_cy: u32,
   fps: u32,
-) -> Result<(), String> {
+) -> Result<(u32, u32), String> {
+  let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
   let mt = MFCreateMediaType().map_err(|e| format!("MFCreateMediaType: {e}"))?;
   mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
     .map_err(|e| format!("MAJOR_TYPE: {e}"))?;
   mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
     .map_err(|e| format!("SUBTYPE NV12: {e}"))?;
-  let frame_size = ((cx as u64) << 32) | (cy as u64);
-  mt.SetUINT64(&MF_MT_FRAME_SIZE, frame_size)
-    .map_err(|e| format!("FRAME_SIZE: {e}"))?;
+  // Do NOT set MF_MT_FRAME_SIZE — let the device keep its native aspect ratio.
   let fps_n = u64::from(fps.max(1));
-  let frame_rate = (fps_n << 32) | 1u64;
-  let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, frame_rate);
+  let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, (fps_n << 32) | 1u64);
 
-  let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
   if reader.SetCurrentMediaType(stream, None, &mt).is_err() {
     let _ = mt.DeleteItem(&MF_MT_FRAME_RATE);
     reader
@@ -240,17 +343,18 @@ unsafe fn set_nv12_type(
   }
   let _ = reader.SetStreamSelection(stream, true);
 
-  // Confirm negotiated size is what we asked for.
-  if let Ok(t) = reader.GetCurrentMediaType(stream) {
-    if let Ok(sz) = t.GetUINT64(&MF_MT_FRAME_SIZE) {
-      let w = (sz >> 32) as u32;
-      let h = sz as u32;
-      if w != cx || h != cy {
-        return Err(format!("摄像头协商尺寸为 {w}x{h}，不是 {cx}x{cy}"));
-      }
-    }
+  let t = reader
+    .GetCurrentMediaType(stream)
+    .map_err(|e| format!("GetCurrentMediaType: {e}"))?;
+  let sz = t
+    .GetUINT64(&MF_MT_FRAME_SIZE)
+    .map_err(|e| format!("FRAME_SIZE: {e}"))?;
+  let w = (sz >> 32) as u32;
+  let h = sz as u32;
+  if w == 0 || h == 0 {
+    return Err("摄像头协商尺寸无效".into());
   }
-  Ok(())
+  Ok((w, h))
 }
 
 unsafe fn current_stride(reader: &IMFSourceReader, cx: u32) -> Result<i32, String> {

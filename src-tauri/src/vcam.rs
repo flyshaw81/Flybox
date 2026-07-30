@@ -1,12 +1,13 @@
 //! FLYBOX virtual camera (OBS win-dshow based filter DLL + shared-memory frames).
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,34 @@ const DEVICE_CLSID: &str = "{A8E7F6D5-C4B3-4A29-9E1D-8C7B6A594837}";
 const DEVICE_NAME: &str = "FLYBOX Camera";
 /// Must match `shared-memory-queue.c` VIDEO_NAME.
 const SHM_NAME: &str = "FLYBOXVirtualCamVideo";
+
+/// How the camera image is fitted into the virtual-cam canvas.
+/// Mirrors OBS source transform **Bounding Box Type** (no stretch — always keep aspect):
+/// - Contain ≈ Scale to inner bounds (keep ratio, black bars)
+/// - Cover ≈ Scale to outer bounds (keep ratio, crop)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FitMode {
+  #[default]
+  Contain,
+  Cover,
+}
+
+impl FitMode {
+  fn parse(s: Option<&str>) -> Self {
+    match s.map(|x| x.trim().to_ascii_lowercase()).as_deref() {
+      Some("cover") | Some("crop") | Some("outer") => FitMode::Cover,
+      // Legacy "stretch" maps to contain (never distort people).
+      _ => FitMode::Contain,
+    }
+  }
+
+  fn as_str(self) -> &'static str {
+    match self {
+      FitMode::Contain => "contain",
+      FitMode::Cover => "cover",
+    }
+  }
+}
 
 /// Output geometry/timing for SHM + capture (OBS negotiates this; we expose presets).
 #[derive(Debug, Clone, Copy)]
@@ -29,13 +58,16 @@ struct OutputSpec {
 }
 
 impl OutputSpec {
+  /// Canvas size like OBS Settings → Video (aspect comes from w×h).
+  /// Supports 720p / 1K / 2K / 4K × common ratios (even dims for NV12).
   fn resolve(width: Option<u32>, height: Option<u32>, fps: Option<u32>) -> Self {
-    let (w, h) = match (width.unwrap_or(1920), height.unwrap_or(1080)) {
-      (1920, 1080) => (1920, 1080),
-      (1280, 720) => (1280, 720),
-      (640, 360) => (640, 360),
-      (ww, _) if ww >= 1600 => (1920, 1080),
-      (ww, _) if ww >= 1000 => (1280, 720),
+    let w0 = width.unwrap_or(1920);
+    let h0 = height.unwrap_or(1080);
+    // Up to 4K; keep even width/height for NV12.
+    let (w, h) = match (w0, h0) {
+      (ww, hh) if (320..=3840).contains(&ww) && (240..=3840).contains(&hh) => {
+        (ww & !1, hh & !1)
+      }
       _ => (1920, 1080),
     };
     let fps = match fps.unwrap_or(30) {
@@ -44,6 +76,28 @@ impl OutputSpec {
     };
     let interval = 10_000_000u64 / u64::from(fps);
     Self { w, h, fps, interval }
+  }
+
+  fn aspect_label(self) -> &'static str {
+    let w = self.w as f64;
+    let h = self.h as f64;
+    if h <= 0.0 {
+      return "?";
+    }
+    let r = w / h;
+    if (r - 16.0 / 9.0).abs() < 0.08 {
+      "16:9"
+    } else if (r - 4.0 / 3.0).abs() < 0.08 {
+      "4:3"
+    } else if (r - 3.0 / 4.0).abs() < 0.08 {
+      "3:4"
+    } else if (r - 9.0 / 16.0).abs() < 0.08 {
+      "9:16"
+    } else if (r - 1.0).abs() < 0.08 {
+      "1:1"
+    } else {
+      "自定义"
+    }
   }
 
   fn frame_bytes(self) -> usize {
@@ -55,7 +109,7 @@ impl OutputSpec {
   }
 
   fn label(self) -> String {
-    format!("{}x{}@{}fps", self.w, self.h, self.fps)
+    format!("{} {}x{}@{}fps", self.aspect_label(), self.w, self.h, self.fps)
   }
 }
 
@@ -87,6 +141,8 @@ struct VcamInner {
   preview: Arc<Mutex<Option<PreviewRgba>>>,
   /// `mf` | `ffmpeg` | `test` while running.
   capture_backend: Option<String>,
+  /// OBS-style bounding-box fit into output canvas.
+  fit_mode: FitMode,
 }
 
 struct PreviewRgba {
@@ -108,6 +164,7 @@ impl Default for VcamState {
         frames: Arc::new(AtomicU64::new(0)),
         preview: Arc::new(Mutex::new(None)),
         capture_backend: None,
+        fit_mode: FitMode::Contain,
       }),
     }
   }
@@ -136,10 +193,14 @@ pub struct VcamStatus {
   pub width: u32,
   pub height: u32,
   pub fps: u32,
+  /// e.g. `16:9` / `4:3` / `9:16` / `1:1` (from canvas size).
+  pub aspect: String,
   /// Non-empty when output is test bars after a camera problem (or similar).
   pub warn: Option<String>,
   /// `mf` | `ffmpeg` | `test` while running; null when idle.
   pub capture_backend: Option<String>,
+  /// `contain` | `cover` (OBS bounding-box style; always keep aspect).
+  pub fit_mode: String,
   pub message: String,
   pub source_note: String,
   pub dll_path: Option<String>,
@@ -149,6 +210,10 @@ pub struct VcamStatus {
 #[serde(rename_all = "camelCase")]
 pub struct VcamSource {
   pub name: String,
+  /// Highest native mode width (0 = unknown).
+  pub max_width: u32,
+  /// Highest native mode height (0 = unknown).
+  pub max_height: u32,
 }
 
 fn lock(state: &VcamState) -> Result<std::sync::MutexGuard<'_, VcamInner>, String> {
@@ -336,10 +401,19 @@ extern "C" {
 #[link(name = "kernel32")]
 extern "system" {
   fn OpenFileMappingW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
+  fn MapViewOfFile(
+    h: *mut std::ffi::c_void,
+    access: u32,
+    off_high: u32,
+    off_low: u32,
+    bytes: usize,
+  ) -> *mut std::ffi::c_void;
+  fn UnmapViewOfFile(p: *const std::ffi::c_void) -> i32;
   fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
 }
 
 const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
+const FILE_MAP_READ: u32 = 0x0004;
 
 fn shm_is_open() -> bool {
   let wide: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
@@ -352,6 +426,43 @@ fn shm_is_open() -> bool {
       true
     }
   }
+}
+
+/// Read OBS queue header `cx`/`cy` from live SHM (ground truth for quality tier).
+/// Layout matches `shared-memory-queue.c` struct queue_header: cx@28, cy@32.
+fn read_shm_geometry() -> Option<(u32, u32)> {
+  let wide: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+  unsafe {
+    let h = OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr());
+    if h.is_null() {
+      return None;
+    }
+    let view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, 64);
+    if view.is_null() {
+      CloseHandle(h);
+      return None;
+    }
+    let base = view as *const u8;
+    let cx = std::ptr::read_unaligned(base.add(28) as *const u32);
+    let cy = std::ptr::read_unaligned(base.add(32) as *const u32);
+    UnmapViewOfFile(view);
+    CloseHandle(h);
+    if cx >= 160 && cy >= 120 {
+      Some((cx, cy))
+    } else {
+      None
+    }
+  }
+}
+
+fn read_res_file_geometry() -> Option<(u32, u32)> {
+  let base = std::env::var("APPDATA").ok()?;
+  let body = fs::read_to_string(PathBuf::from(base).join("flybox-virtualcam.txt")).ok()?;
+  // format: {w}x{h}x{interval}
+  let mut parts = body.trim().split('x');
+  let w: u32 = parts.next()?.parse().ok()?;
+  let h: u32 = parts.next()?.parse().ok()?;
+  Some((w, h))
 }
 
 /// Thin Rust owner around OBS `video_queue_create` / `write` / `close`.
@@ -471,25 +582,192 @@ fn ffmpeg_no_window(program: impl AsRef<std::ffi::OsStr>) -> Command {
   c
 }
 
-/// List video capture devices (MF first, ffmpeg dshow fallback). Excludes FLYBOX.
-pub fn list_video_sources() -> Result<Vec<VcamSource>, String> {
+/// Fit requested canvas inside the camera's max native box (keep aspect, even dims).
+/// Only clamps when caps are **plausible** (see `is_plausible_cam_max`).
+fn clamp_canvas_to_camera(requested: OutputSpec, cam_w: u32, cam_h: u32) -> (OutputSpec, bool) {
+  if !is_plausible_cam_max(cam_w, cam_h) {
+    return (requested, false);
+  }
+  if requested.w <= cam_w && requested.h <= cam_h {
+    return (requested, false);
+  }
+  let scale = (cam_w as f64 / requested.w as f64).min(cam_h as f64 / requested.h as f64);
+  let w = ((requested.w as f64 * scale).floor() as u32).max(2) & !1;
+  let h = ((requested.h as f64 * scale).floor() as u32).max(2) & !1;
+  let clamped = OutputSpec::resolve(Some(w), Some(h), Some(requested.fps));
+  (clamped, true)
+}
+
+/// Real webcams expose ≥720p-class modes. Tiny "max" (e.g. 800×448) is a bad
+/// partial probe (busy device / wrong pin) — never use it to down-clamp product tiers.
+fn is_plausible_cam_max(w: u32, h: u32) -> bool {
+  w >= 640 && h >= 480 && (u64::from(w) * u64::from(h) >= 1280 * 720)
+}
+
+fn cam_caps_cache() -> &'static Mutex<HashMap<String, (u32, u32)>> {
+  static CACHE: OnceLock<Mutex<HashMap<String, (u32, u32)>>> = OnceLock::new();
+  CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_cam_caps(name: &str, w: u32, h: u32) {
+  if !is_plausible_cam_max(w, h) {
+    return;
+  }
+  if let Ok(mut g) = cam_caps_cache().lock() {
+    // Keep the larger of old/new (never regress to a tinier wrong probe).
+    let entry = g.entry(name.to_string()).or_insert((0, 0));
+    let old_pix = u64::from(entry.0) * u64::from(entry.1);
+    let new_pix = u64::from(w) * u64::from(h);
+    if new_pix >= old_pix {
+      *entry = (w, h);
+    }
+  }
+}
+
+fn cached_cam_caps(name: &str) -> Option<(u32, u32)> {
+  cam_caps_cache()
+    .lock()
+    .ok()
+    .and_then(|g| g.get(name).copied())
+    .filter(|(w, h)| is_plausible_cam_max(*w, *h))
+}
+
+/// OBS-aligned: enumerate DirectShow pin options via ffmpeg `dshow -list_options`
+/// (same IAMStreamConfig / GetStreamCaps data OBS uses through libdshowcapture).
+fn probe_dshow_max_via_ffmpeg(device: &str) -> Option<(u32, u32)> {
+  let ffmpeg = ffmpeg_util::find_tool("ffmpeg.exe").or_else(|| ffmpeg_util::find_tool("ffmpeg"))?;
+  let input = format!("video={device}");
+  let out = ffmpeg_no_window(ffmpeg)
+    .args([
+      "-hide_banner",
+      "-f",
+      "dshow",
+      "-list_options",
+      "true",
+      "-i",
+      &input,
+    ])
+    .output()
+    .ok()?;
+  let text = decode_ffmpeg_bytes(&out.stderr);
+  let text2 = decode_ffmpeg_bytes(&out.stdout);
+  parse_dshow_list_options_max(&format!("{text}\n{text2}"))
+}
+
+/// Largest `s=WxH` / `max s=WxH` from ffmpeg dshow -list_options output.
+fn parse_dshow_list_options_max(text: &str) -> Option<(u32, u32)> {
+  let mut best_w = 0u32;
+  let mut best_h = 0u32;
+  let mut best_pix = 0u64;
+  let bytes = text.as_bytes();
+  let mut i = 0usize;
+  while i + 2 < bytes.len() {
+    if bytes[i] == b's' && bytes[i + 1] == b'=' {
+      if let Some((w, h, consumed)) = parse_wxh_at(&text[i + 2..]) {
+        let pix = u64::from(w) * u64::from(h);
+        if w >= 160 && h >= 120 && pix > best_pix {
+          best_pix = pix;
+          best_w = w;
+          best_h = h;
+        }
+        i += 2 + consumed;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  if is_plausible_cam_max(best_w, best_h) {
+    Some((best_w, best_h))
+  } else {
+    None
+  }
+}
+
+fn parse_wxh_at(s: &str) -> Option<(u32, u32, usize)> {
+  let mut w_str = String::new();
+  let mut h_str = String::new();
+  let mut chars = s.char_indices();
+  for (_, c) in chars.by_ref() {
+    if c.is_ascii_digit() {
+      w_str.push(c);
+    } else if c == 'x' || c == 'X' {
+      break;
+    } else {
+      return None;
+    }
+  }
+  if w_str.is_empty() {
+    return None;
+  }
+  for (idx, c) in chars {
+    if c.is_ascii_digit() {
+      h_str.push(c);
+    } else {
+      let w: u32 = w_str.parse().ok()?;
+      let h: u32 = h_str.parse().ok()?;
+      return Some((w, h, idx));
+    }
+  }
+  if h_str.is_empty() {
+    return None;
+  }
+  let w: u32 = w_str.parse().ok()?;
+  let h: u32 = h_str.parse().ok()?;
+  Some((w, h, s.len()))
+}
+
+/// Resolve camera max: DShow list_options first (OBS), then trusted cache; never junk.
+fn resolve_cam_max(name: &str, hint_w: Option<u32>, hint_h: Option<u32>) -> Option<(u32, u32)> {
+  if let Some(v) = cached_cam_caps(name) {
+    return Some(v);
+  }
+  if let (Some(w), Some(h)) = (hint_w, hint_h) {
+    if is_plausible_cam_max(w, h) {
+      cache_cam_caps(name, w, h);
+      return Some((w, h));
+    }
+  }
+  if let Some((w, h)) = probe_dshow_max_via_ffmpeg(name) {
+    cache_cam_caps(name, w, h);
+    return Some((w, h));
+  }
   #[cfg(windows)]
   {
-    if let Ok(mf_names) = crate::vcam_mf::list_video_device_names() {
-      if !mf_names.is_empty() {
-        return Ok(
-          mf_names
-            .into_iter()
-            .map(|name| VcamSource { name })
-            .collect(),
-        );
+    if let Ok((w, h)) = crate::vcam_mf::probe_device_max_size(name) {
+      if is_plausible_cam_max(w, h) {
+        cache_cam_caps(name, w, h);
+        return Some((w, h));
       }
     }
   }
-  list_video_sources_ffmpeg()
+  None
 }
 
-fn list_video_sources_ffmpeg() -> Result<Vec<VcamSource>, String> {
+/// List devices + real max res (DirectShow pin caps via ffmpeg, OBS-aligned).
+pub fn list_video_sources() -> Result<Vec<VcamSource>, String> {
+  let mut names: Vec<String> = Vec::new();
+  #[cfg(windows)]
+  {
+    if let Ok(list) = crate::vcam_mf::list_video_device_names() {
+      names = list;
+    }
+  }
+  if names.is_empty() {
+    names = list_video_source_names_ffmpeg()?;
+  }
+  let mut out = Vec::new();
+  for name in names {
+    let (max_width, max_height) = resolve_cam_max(&name, None, None).unwrap_or((0, 0));
+    out.push(VcamSource {
+      name,
+      max_width,
+      max_height,
+    });
+  }
+  Ok(out)
+}
+
+fn list_video_source_names_ffmpeg() -> Result<Vec<String>, String> {
   let ffmpeg = ffmpeg_util::find_tool("ffmpeg.exe")
     .or_else(|| ffmpeg_util::find_tool("ffmpeg"))
     .ok_or_else(|| "找不到 ffmpeg.exe，无法列出摄像头".to_string())?;
@@ -505,11 +783,9 @@ fn list_video_sources_ffmpeg() -> Result<Vec<VcamSource>, String> {
     ])
     .output()
     .map_err(|e| format!("列出摄像头失败: {e}"))?;
-  // ffmpeg prints device list to stderr and exits non-zero; still parse it.
   let text = decode_ffmpeg_bytes(&out.stderr);
   let mut names = Vec::new();
   for line in text.lines() {
-    // e.g. [dshow @ ...] "Device Name" (video)
     if !line.contains("(video)") {
       continue;
     }
@@ -524,16 +800,13 @@ fn list_video_sources_ffmpeg() -> Result<Vec<VcamSource>, String> {
     if name.is_empty() {
       continue;
     }
-    // Do not offer our own virtual device as a capture source.
     if name.eq_ignore_ascii_case(DEVICE_NAME) || name.contains("FLYBOX Camera") {
       continue;
     }
-    if names.iter().any(|s: &VcamSource| s.name == name) {
+    if names.iter().any(|s: &String| s == name) {
       continue;
     }
-    names.push(VcamSource {
-      name: name.to_string(),
-    });
+    names.push(name.to_string());
   }
   Ok(names)
 }
@@ -680,13 +953,15 @@ fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
     "输出线程异常：尚未向系统送帧。请点「停止」再「开始输出」。".into()
   } else if g.running {
     let geo = g.spec.label();
+    // Always spell out raw pixels so quality tier changes are obvious in UI.
+    let px = format!("{}×{}", g.spec.w, g.spec.h);
     if let Some(ref src) = g.source {
       format!(
-        "正在输出「{src}」→ FLYBOX Camera {geo}（已送 {frame_n} 帧）。直播伴侣选同分辨率。"
+        "正在输出「{src}」→ FLYBOX Camera {geo}（画布 {px}，已送 {frame_n} 帧）。伴侣请选 {px}。"
       )
     } else {
       format!(
-        "正在输出测试彩条 → FLYBOX Camera {geo}（已送 {frame_n} 帧）。"
+        "正在输出测试彩条 → FLYBOX Camera {geo}（画布 {px}，已送 {frame_n} 帧）。"
       )
     }
   } else if installed {
@@ -706,8 +981,10 @@ fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
     width: g.spec.w,
     height: g.spec.h,
     fps: g.spec.fps,
+    aspect: g.spec.aspect_label().into(),
     warn: g.warn.clone(),
     capture_backend: g.capture_backend.clone(),
+    fit_mode: g.fit_mode.as_str().into(),
     message,
     source_note:
       "基于 OBS plugins/win-dshow 虚拟摄像头（GPL）。源码：src-vcam/；上架前公开本模块。"
@@ -716,19 +993,28 @@ fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
   })
 }
 
-/// High-quality scale to target NV12 (lanczos + full chroma — closer to OBS quality).
+/// High-quality scale to canvas with OBS-style fit (bounding box).
 /// bt709 + limited (tv) range matches typical live encode / companion expectations.
-fn scale_vf_hq(spec: OutputSpec) -> String {
-  format!(
-    "scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp:\
-     force_original_aspect_ratio=decrease,\
-     pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,\
-     setsar=1,\
-     format=nv12,\
-     colorspace=bt709:iall=bt709:fast=1",
-    w = spec.w,
-    h = spec.h
-  )
+fn scale_vf_hq(spec: OutputSpec, fit: FitMode) -> String {
+  let geo = match fit {
+    // OBS: Scale to inner bounds
+    FitMode::Contain => format!(
+      "scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp:\
+       force_original_aspect_ratio=decrease,\
+       pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black",
+      w = spec.w,
+      h = spec.h
+    ),
+    // OBS: Scale to outer bounds
+    FitMode::Cover => format!(
+      "scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp:\
+       force_original_aspect_ratio=increase,\
+       crop={w}:{h}",
+      w = spec.w,
+      h = spec.h
+    ),
+  };
+  format!("{geo},setsar=1,format=nv12,colorspace=bt709:iall=bt709:fast=1")
 }
 
 /// Capture session → packed NV12 frames (MF in-process preferred; ffmpeg fallback).
@@ -793,38 +1079,122 @@ impl CameraCapture {
   }
 }
 
-/// Nearest-neighbor scale packed NV12 → packed NV12 (L2 reconfigure fallback).
-fn scale_nv12_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+/// Sample one Y pixel (nearest).
+fn nv12_y(src: &[u8], sw: usize, sh: usize, x: usize, y: usize) -> u8 {
+  let x = x.min(sw.saturating_sub(1));
+  let y = y.min(sh.saturating_sub(1));
+  src[y * sw + x]
+}
+
+/// Sample NV12 UV (interleaved) at luma coords (even-aligned).
+fn nv12_uv(src_uv: &[u8], sw: usize, sh: usize, x: usize, y: usize) -> (u8, u8) {
+  let x = (x.min(sw.saturating_sub(1))) & !1;
+  let y = (y.min(sh.saturating_sub(1))) / 2;
+  let uv_h = sh / 2;
+  let y = y.min(uv_h.saturating_sub(1));
+  let i = y * sw + x;
+  if i + 1 < src_uv.len() {
+    (src_uv[i], src_uv[i + 1])
+  } else {
+    (128, 128)
+  }
+}
+
+/// Packed NV12 scale with OBS-style fit into `dw×dh`.
+fn scale_nv12_fit(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, fit: FitMode) -> Vec<u8> {
   let sw = sw.max(1) as usize;
   let sh = sh.max(1) as usize;
   let dw = dw.max(1) as usize;
   let dh = dh.max(1) as usize;
-  let src_y = sw * sh;
-  let need_src = src_y + src_y / 2;
-  let mut out = vec![0u8; dw * dh + dw * dh / 2];
+  let src_y_sz = sw * sh;
+  let need_src = src_y_sz + src_y_sz / 2;
+  let mut out = vec![16u8; dw * dh]; // limited-range black Y
+  out.resize(dw * dh + dw * dh / 2, 128u8); // neutral UV
   if src.len() < need_src {
     return out;
   }
+  let src_uv = &src[src_y_sz..];
+
+  let (src_x0, src_y0, map_w, map_h) = match fit {
+    FitMode::Contain => {
+      // Fit entire source into dest; letterbox/pillarbox (handled via content rect).
+      (0.0, 0.0, sw as f64, sh as f64)
+    }
+    FitMode::Cover => {
+      // Fill dest; crop source.
+      let scale = (dw as f64 / sw as f64).max(dh as f64 / sh as f64);
+      let mw = dw as f64 / scale;
+      let mh = dh as f64 / scale;
+      let sx0 = (sw as f64 - mw) / 2.0;
+      let sy0 = (sh as f64 - mh) / 2.0;
+      (sx0, sy0, mw, mh)
+    }
+  };
+
+  let content = match fit {
+    FitMode::Contain => {
+      let scale = (dw as f64 / sw as f64).min(dh as f64 / sh as f64);
+      let mw = (sw as f64 * scale).round().max(1.0) as usize;
+      let mh = (sh as f64 * scale).round().max(1.0) as usize;
+      let ox = (dw.saturating_sub(mw)) / 2;
+      let oy = (dh.saturating_sub(mh)) / 2;
+      Some((ox, oy, mw, mh))
+    }
+    FitMode::Cover => None,
+  };
+
   for y in 0..dh {
-    let sy = y * sh / dh;
     for x in 0..dw {
-      let sx = x * sw / dw;
-      out[y * dw + x] = src[sy * sw + sx];
+      let (sx, sy) = match fit {
+        FitMode::Cover => {
+          let sx = (src_x0 + (x as f64 + 0.5) * map_w / dw as f64) as usize;
+          let sy = (src_y0 + (y as f64 + 0.5) * map_h / dh as f64) as usize;
+          (sx, sy)
+        }
+        FitMode::Contain => {
+          let (ox, oy, mw, mh) = content.unwrap();
+          if x < ox || y < oy || x >= ox + mw || y >= oy + mh {
+            continue; // leave black
+          }
+          let sx = (x - ox) * sw / mw.max(1);
+          let sy = (y - oy) * sh / mh.max(1);
+          (sx, sy)
+        }
+      };
+      out[y * dw + x] = nv12_y(src, sw, sh, sx, sy);
     }
   }
+
   let dst_y = dw * dh;
-  let src_uv = &src[src_y..];
   let uv_dh = dh / 2;
-  let uv_sh = sh / 2;
   for y in 0..uv_dh {
-    let sy = y * uv_sh / uv_dh.max(1);
-    for x in 0..dw {
-      // UV is interleaved; sample even x for U pair start.
-      let sx = (x * sw / dw) & !1;
-      let si = sy * sw + sx.min(sw - 1);
+    for x in (0..dw).step_by(2) {
+      let ly = y * 2;
+      let (sx, sy, write) = match fit {
+        FitMode::Cover => {
+          let sx = (src_x0 + (x as f64 + 0.5) * map_w / dw as f64) as usize;
+          let sy = (src_y0 + (ly as f64 + 0.5) * map_h / dh as f64) as usize;
+          (sx, sy, true)
+        }
+        FitMode::Contain => {
+          let (ox, oy, mw, mh) = content.unwrap();
+          if x < ox || ly < oy || x >= ox + mw || ly >= oy + mh {
+            (0, 0, false)
+          } else {
+            let sx = (x - ox) * sw / mw.max(1);
+            let sy = (ly - oy) * sh / mh.max(1);
+            (sx, sy, true)
+          }
+        }
+      };
+      if !write {
+        continue;
+      }
+      let (u, v) = nv12_uv(src_uv, sw, sh, sx, sy);
       let di = y * dw + x;
-      if si < src_uv.len() && di < out.len() - dst_y {
-        out[dst_y + di] = src_uv[si];
+      if di + 1 < out.len() - dst_y {
+        out[dst_y + di] = u;
+        out[dst_y + di + 1] = v;
       }
     }
   }
@@ -861,10 +1231,12 @@ fn spawn_ffmpeg_raw(
   device: &str,
   spec: OutputSpec,
   mode: u8,
+  fit: FitMode,
 ) -> Result<std::process::Child, String> {
   let input = format!("video={device}");
   let fps_s = spec.fps.to_string();
   let size_s = format!("{}x{}", spec.w, spec.h);
+  let vf = scale_vf_hq(spec, fit);
   let mut cmd = ffmpeg_no_window(ffmpeg);
   cmd.arg("-hide_banner")
     .arg("-loglevel")
@@ -883,6 +1255,7 @@ fn spawn_ffmpeg_raw(
   // Mode ladder (C930c-class cams often cannot do 1080p60 natively):
   // 0 exact size@fps, 1 mjpeg size@fps, 2 any input + HQ scale + output fps,
   // 3 any input @30 + scale + output fps (best for 1080p60 from 30fps sensors).
+  // All modes use OBS-style fit (contain/cover, keep aspect) via scale_vf_hq.
   match mode {
     0 => {
       cmd
@@ -894,11 +1267,7 @@ fn spawn_ffmpeg_raw(
         .arg(&input)
         .arg("-an")
         .arg("-vf")
-        .arg(format!(
-          "scale={w}:{h}:flags=bicubic,format=nv12",
-          w = spec.w,
-          h = spec.h
-        ))
+        .arg(&vf)
         .arg("-r")
         .arg(&fps_s);
     }
@@ -914,7 +1283,7 @@ fn spawn_ffmpeg_raw(
         .arg(&input)
         .arg("-an")
         .arg("-vf")
-        .arg(scale_vf_hq(spec))
+        .arg(&vf)
         .arg("-r")
         .arg(&fps_s);
     }
@@ -925,7 +1294,7 @@ fn spawn_ffmpeg_raw(
         .arg(&input)
         .arg("-an")
         .arg("-vf")
-        .arg(scale_vf_hq(spec))
+        .arg(&vf)
         .arg("-r")
         .arg(&fps_s);
     }
@@ -938,7 +1307,7 @@ fn spawn_ffmpeg_raw(
         .arg(&input)
         .arg("-an")
         .arg("-vf")
-        .arg(scale_vf_hq(spec))
+        .arg(&vf)
         .arg("-r")
         .arg(&fps_s);
     }
@@ -1003,8 +1372,13 @@ fn read_exact_timeout(
   Ok(())
 }
 
-fn open_camera_capture(device: &str, spec: OutputSpec) -> Result<CameraCapture, String> {
+fn open_camera_capture(
+  device: &str,
+  spec: OutputSpec,
+  fit: FitMode,
+) -> Result<CameraCapture, String> {
   // D1: prefer in-process Media Foundation (no ffmpeg child).
+  // MF opens near-native size; we software-scale with FitMode (OBS bounding box).
   #[cfg(windows)]
   {
     match crate::vcam_mf::MfCamera::open(device, spec.w, spec.h, spec.fps) {
@@ -1016,10 +1390,14 @@ fn open_camera_capture(device: &str, spec: OutputSpec) -> Result<CameraCapture, 
       }
     }
   }
-  open_camera_capture_ffmpeg(device, spec)
+  open_camera_capture_ffmpeg(device, spec, fit)
 }
 
-fn open_camera_capture_ffmpeg(device: &str, spec: OutputSpec) -> Result<CameraCapture, String> {
+fn open_camera_capture_ffmpeg(
+  device: &str,
+  spec: OutputSpec,
+  fit: FitMode,
+) -> Result<CameraCapture, String> {
   let ffmpeg = ffmpeg_util::find_tool("ffmpeg.exe")
     .or_else(|| ffmpeg_util::find_tool("ffmpeg"))
     .ok_or_else(|| "找不到 ffmpeg.exe，无法采集摄像头".to_string())?;
@@ -1029,7 +1407,7 @@ fn open_camera_capture_ffmpeg(device: &str, spec: OutputSpec) -> Result<CameraCa
 
   // Try capture modes best→fallback (OBS also negotiates formats, not a single fixed path).
   for mode in [0u8, 1u8, 2u8, 3u8] {
-    let mut child = match spawn_ffmpeg_raw(&ffmpeg, device, spec, mode) {
+    let mut child = match spawn_ffmpeg_raw(&ffmpeg, device, spec, mode, fit) {
       Ok(c) => c,
       Err(e) => {
         last_err = e;
@@ -1088,7 +1466,9 @@ fn pump_camera_to_shm(
   frame_i0: u64,
   out_spec: OutputSpec,
   cap_spec: OutputSpec,
+  fit: FitMode,
 ) -> Result<u64, String> {
+  // Software fit when capture geometry ≠ canvas (MF native / L2). Ffmpeg already fits in vf.
   let need_scale = cap_spec.w != out_spec.w || cap_spec.h != out_spec.h;
   let frame_size = cam.frame_size();
   let mut buf_a = cam.take_first_frame();
@@ -1105,7 +1485,14 @@ fn pump_camera_to_shm(
                  frame_i: u64|
    -> u64 {
     let out = if need_scale {
-      scale_nv12_nearest(raw, cap_spec.w, cap_spec.h, out_spec.w, out_spec.h)
+      scale_nv12_fit(
+        raw,
+        cap_spec.w,
+        cap_spec.h,
+        out_spec.w,
+        out_spec.h,
+        fit,
+      )
     } else {
       raw.to_vec()
     };
@@ -1160,12 +1547,21 @@ fn wait_shm_free(max_ms: u64) -> bool {
 fn open_camera_with_fallback(
   device: &str,
   requested: OutputSpec,
+  fit: FitMode,
 ) -> Result<(CameraCapture, OutputSpec, Option<String>), String> {
+  // Fallback ladder stays in the same aspect family (like lowering OBS canvas res).
   let mut attempts = vec![requested];
-  for fb in [
-    OutputSpec::resolve(Some(1920), Some(1080), Some(30)),
-    OutputSpec::resolve(Some(1280), Some(720), Some(30)),
-  ] {
+  let family: &[(u32, u32)] = if requested.w > requested.h {
+    // landscape: prefer 16:9 then 4:3-ish
+    &[(1920, 1080), (1280, 720), (1440, 1080), (640, 480)]
+  } else if requested.w < requested.h {
+    // portrait 9:16
+    &[(1080, 1920), (720, 1280), (540, 960)]
+  } else {
+    &[(1080, 1080), (720, 720)]
+  };
+  for &(fw, fh) in family {
+    let fb = OutputSpec::resolve(Some(fw), Some(fh), Some(30));
     if !attempts
       .iter()
       .any(|s| s.w == fb.w && s.h == fb.h && s.fps == fb.fps)
@@ -1175,13 +1571,12 @@ fn open_camera_with_fallback(
   }
   let mut last_err = String::new();
   for (i, try_spec) in attempts.iter().enumerate() {
+    // Only pause between retries (first open: no artificial delay — faster start).
     if i > 0 {
-      thread::sleep(Duration::from_millis(350));
-    } else {
-      thread::sleep(Duration::from_millis(150));
+      thread::sleep(Duration::from_millis(200));
     }
     write_res_file(try_spec.w, try_spec.h, try_spec.interval);
-    match open_camera_capture(device, *try_spec) {
+    match open_camera_capture(device, *try_spec, fit) {
       Ok(cam) => {
         let warn = if i > 0 {
           Some(format!(
@@ -1195,7 +1590,19 @@ fn open_camera_with_fallback(
         } else {
           None
         };
-        return Ok((cam, *try_spec, warn));
+        // Report true capture geometry (MF native), not canvas size — avoids stretch bugs.
+        let (cw, ch) = cam.capture_size();
+        let cap_spec = if cw > 0 && ch > 0 {
+          OutputSpec {
+            w: cw,
+            h: ch,
+            fps: try_spec.fps,
+            interval: try_spec.interval,
+          }
+        } else {
+          *try_spec
+        };
+        return Ok((cam, cap_spec, warn));
       }
       Err(e) => last_err = e,
     }
@@ -1218,12 +1625,13 @@ fn spawn_camera_thread(
   requested: OutputSpec,
   // If set, SHM is forced to this size (L2 scale path); capture still uses `requested`.
   force_out_spec: Option<OutputSpec>,
+  fit: FitMode,
   ready_tx: std::sync::mpsc::Sender<Result<OpenReady, String>>,
 ) -> thread::JoinHandle<()> {
   thread::spawn(move || {
     bump_thread_priority();
 
-    let open = match open_camera_with_fallback(&device, requested) {
+    let open = match open_camera_with_fallback(&device, requested, fit) {
       Ok(v) => v,
       Err(e) => {
         let _ = ready_tx.send(Err(e));
@@ -1240,9 +1648,11 @@ fn spawn_camera_thread(
       });
     }
 
-    let out_spec = force_out_spec.unwrap_or(cap_spec);
+    // Canvas = user quality×aspect (`requested`), NOT camera native size.
+    // Previously used cap_spec here → 清晰度档位形同虚设（输出永远跟摄像头分辨率）。
+    let out_spec = force_out_spec.unwrap_or(requested);
     write_res_file(out_spec.w, out_spec.h, out_spec.interval);
-    wait_shm_free(500);
+    wait_shm_free(200);
 
     let mut writer = match VideoQueueWriter::create(out_spec.w, out_spec.h, out_spec.interval) {
       Ok(w) => w,
@@ -1252,12 +1662,20 @@ fn spawn_camera_thread(
       }
     };
 
-    if force_out_spec.is_some() && (cap_spec.w != out_spec.w || cap_spec.h != out_spec.h) {
-      let msg = format!(
-        "直播伴侣仍占用虚拟摄像头，已按 {} 缩放输出到 {}。若要原生分辨率，请在伴侣中取消/重选 FLYBOX 后再切一次。",
-        cap_spec.label(),
-        out_spec.label()
-      );
+    if cap_spec.w != out_spec.w || cap_spec.h != out_spec.h {
+      let msg = if force_out_spec.is_some() {
+        format!(
+          "直播伴侣仍占用虚拟摄像头，已按 {} 缩放输出到 {}。若要原生分辨率，请在伴侣中取消/重选 FLYBOX 后再切一次。",
+          cap_spec.label(),
+          out_spec.label()
+        )
+      } else {
+        format!(
+          "摄像头采集 {}，画布输出 {}（清晰度/比例已生效，按画面适配缩放）。",
+          cap_spec.label(),
+          out_spec.label()
+        )
+      };
       warn = Some(match warn {
         Some(w) => format!("{w} {msg}"),
         None => msg,
@@ -1292,12 +1710,13 @@ fn spawn_camera_thread(
 
     let mut frame_i = 0u64;
     let mut next = Some(first_cam);
-    let active_cap = cap_spec;
+    // Re-open at canvas request size (ffmpeg ladder); MF ignores size and stays native.
+    let reopen_spec = requested;
 
     while !stop.load(Ordering::SeqCst) {
       let cam = match next.take() {
         Some(c) => c,
-        None => match open_camera_capture(&device, active_cap) {
+        None => match open_camera_capture(&device, reopen_spec, fit) {
           Ok(c) => c,
           Err(_) => {
             if stop.load(Ordering::SeqCst) {
@@ -1308,12 +1727,18 @@ fn spawn_camera_thread(
           }
         },
       };
-      // MF reports real size; ffmpeg uses active_cap.
+          // MF = native cam size → software-fit to canvas (contain/cover).
+      // Ffmpeg = already canvas-sized via vf; capture_size (0,0) means packed = copy.
       let (cw, ch) = match cam.capture_size() {
-        (0, 0) => (active_cap.w, active_cap.h),
+        (0, 0) => (out_spec.w, out_spec.h),
         (w, h) => (w, h),
       };
-      let this_cap = OutputSpec::resolve(Some(cw), Some(ch), Some(active_cap.fps));
+      let this_cap = OutputSpec {
+        w: cw,
+        h: ch,
+        fps: out_spec.fps,
+        interval: out_spec.interval,
+      };
 
       match pump_camera_to_shm(
         &stop,
@@ -1324,6 +1749,7 @@ fn spawn_camera_thread(
         frame_i,
         out_spec,
         this_cap,
+        fit,
       ) {
         Ok(fi) => {
           frame_i = fi;
@@ -1346,8 +1772,21 @@ fn start_output(
   width: Option<u32>,
   height: Option<u32>,
   fps: Option<u32>,
+  fit_mode: Option<String>,
+  max_width: Option<u32>,
+  max_height: Option<u32>,
 ) -> Result<(), String> {
-  start_output_ex(state, source, width, height, fps, None)
+  start_output_ex(
+    state,
+    source,
+    width,
+    height,
+    fps,
+    None,
+    FitMode::parse(fit_mode.as_deref()),
+    max_width,
+    max_height,
+  )
 }
 
 /// `force_out_spec`: L2 path — SHM geometry forced (scale capture into it).
@@ -1358,6 +1797,9 @@ fn start_output_ex(
   height: Option<u32>,
   fps: Option<u32>,
   force_out_spec: Option<OutputSpec>,
+  fit: FitMode,
+  max_width: Option<u32>,
+  max_height: Option<u32>,
 ) -> Result<(), String> {
   if !is_filter_registered() {
     return Err("请先安装/注册虚拟摄像头设备".into());
@@ -1379,7 +1821,24 @@ fn start_output_ex(
     }
   }
 
-  let requested = OutputSpec::resolve(width, height, fps);
+  let mut requested = OutputSpec::resolve(width, height, fps);
+  let mut start_warn: Option<String> = None;
+
+  // Product rule: canvas adapts to camera max. Prefer UI/list cache — avoid slow re-probe on start.
+  if let Some(ref name) = source {
+    if let Some((mw, mh)) = resolve_cam_max(name, max_width, max_height) {
+      let (clamped, did) = clamp_canvas_to_camera(requested, mw, mh);
+      if did {
+        start_warn = Some(format!(
+          "本摄像头最高约 {}×{}，已按硬件能力输出 {}（不会假升清晰度）。",
+          mw,
+          mh,
+          clamped.label()
+        ));
+        requested = clamped;
+      }
+    }
+  }
   write_res_file(requested.w, requested.h, requested.interval);
 
   let stop = Arc::new(AtomicBool::new(false));
@@ -1396,6 +1855,7 @@ fn start_output_ex(
       name,
       requested,
       force_out_spec,
+      fit,
       ready_tx,
     );
     let ready = match ready_rx.recv_timeout(Duration::from_secs(15)) {
@@ -1421,8 +1881,13 @@ fn start_output_ex(
         g.preview = preview;
         g.source = source;
         g.spec = info.out_spec;
-        g.warn = info.warn;
+        g.warn = match (start_warn, info.warn) {
+          (Some(a), Some(b)) => Some(format!("{a} {b}")),
+          (Some(a), None) => Some(a),
+          (None, b) => b,
+        };
         g.capture_backend = Some(info.backend);
+        g.fit_mode = fit;
         g.running = true;
         Ok(())
       }
@@ -1436,7 +1901,7 @@ fn start_output_ex(
     // Test pattern — no COM/camera.
     let spec = force_out_spec.unwrap_or(requested);
     write_res_file(spec.w, spec.h, spec.interval);
-    wait_shm_free(500);
+    wait_shm_free(200);
     let join = spawn_push_thread(stop.clone(), frames.clone(), preview.clone(), spec)?;
     let mut g = lock(state)?;
     g.stop = Some(stop);
@@ -1447,6 +1912,7 @@ fn start_output_ex(
     g.spec = spec;
     g.warn = None;
     g.capture_backend = Some("test".into());
+    g.fit_mode = fit;
     g.running = true;
     Ok(())
   }
@@ -1474,6 +1940,7 @@ fn stop_output(state: &VcamState) -> Result<(), String> {
   g.spec = DEFAULT_SPEC;
   g.warn = None;
   g.capture_backend = None;
+  g.fit_mode = FitMode::Contain;
   g.frames = Arc::new(AtomicU64::new(0));
   if let Ok(mut p) = g.preview.lock() {
     *p = None;
@@ -1482,22 +1949,46 @@ fn stop_output(state: &VcamState) -> Result<(), String> {
   Ok(())
 }
 
-/// Hot-switch resolution/fps. L1: recreate SHM. L2: keep old SHM size + scale if companion holds mapping.
+/// Hot-switch resolution/fps/fit. L1: recreate SHM. L2: keep old SHM size + scale if companion holds mapping.
 fn reconfigure_output(
   state: &VcamState,
   width: Option<u32>,
   height: Option<u32>,
   fps: Option<u32>,
+  fit_mode: Option<String>,
+  max_width: Option<u32>,
+  max_height: Option<u32>,
 ) -> Result<(), String> {
-  let (source, old_spec) = {
+  let (source, old_spec, old_fit) = {
     let g = lock(state)?;
     if !g.running {
       return Err("请先开始输出，再切换分辨率".into());
     }
-    (g.source.clone(), g.spec)
+    (g.source.clone(), g.spec, g.fit_mode)
   };
-  let new_spec = OutputSpec::resolve(width, height, fps);
-  if new_spec.w == old_spec.w && new_spec.h == old_spec.h && new_spec.fps == old_spec.fps {
+  let mut new_spec = OutputSpec::resolve(width, height, fps);
+  let new_fit = fit_mode
+    .as_deref()
+    .map(|s| FitMode::parse(Some(s)))
+    .unwrap_or(old_fit);
+
+  // Apply camera-max clamp before compare (same as start).
+  let caps = if let Some(ref name) = source {
+    resolve_cam_max(name, max_width, max_height).map(|(w, h)| (Some(w), Some(h)))
+  } else {
+    None
+  }
+  .unwrap_or((None, None));
+  if let (Some(mw), Some(mh)) = (caps.0, caps.1) {
+    let (clamped, _) = clamp_canvas_to_camera(new_spec, mw, mh);
+    new_spec = clamped;
+  }
+
+  if new_spec.w == old_spec.w
+    && new_spec.h == old_spec.h
+    && new_spec.fps == old_spec.fps
+    && new_fit == old_fit
+  {
     return Ok(());
   }
 
@@ -1511,46 +2002,42 @@ fn reconfigure_output(
     g.capture_backend = None;
   }
 
-  // L1: wait longer for companion/filter to release the mapping.
-  let free = wait_shm_free(3000);
-  if free {
-    match start_output_ex(
+  // Clarity/aspect MUST change SHM size. Never keep old canvas (old L2 made every
+  // quality tier look identical while companion held the mapping).
+  let free = wait_shm_free(4000);
+
+  if !free {
+    // Restore previous output so user is not left stopped.
+    let _ = start_output_ex(
       state,
       source.clone(),
-      Some(new_spec.w),
-      Some(new_spec.h),
-      Some(new_spec.fps),
+      Some(old_spec.w),
+      Some(old_spec.h),
+      Some(old_spec.fps),
       None,
-    ) {
-      Ok(()) => return Ok(()),
-      Err(e) => {
-        // Fall through to L2 / restore.
-        eprintln!("[vcam] reconfigure L1 failed: {e}");
-      }
-    }
+      old_fit,
+      caps.0,
+      caps.1,
+    );
+    return Err(
+      "无法切换清晰度/比例：共享内存仍被占用。请先在直播伴侣中取消选择 FLYBOX Camera，再切换。"
+        .into(),
+    );
   }
 
-  // L2: force SHM to old size, capture at new request, scale into SHM (stay live).
   match start_output_ex(
     state,
     source.clone(),
     Some(new_spec.w),
     Some(new_spec.h),
     Some(new_spec.fps),
-    Some(old_spec),
+    None, // always new canvas size — never force old_spec
+    new_fit,
+    caps.0,
+    caps.1,
   ) {
-    Ok(()) => {
-      let mut g = lock(state)?;
-      let extra = "直播伴侣仍占用虚拟摄像头，已用缩放维持输出。若要原生分辨率，请在伴侣中重选/取消 FLYBOX 后再切一次。";
-      g.warn = Some(match g.warn.take() {
-        Some(w) if w.contains("缩放") => w,
-        Some(w) => format!("{w} {extra}"),
-        None => extra.into(),
-      });
-      Ok(())
-    }
-    Err(e2) => {
-      // Last resort: restore old preset exactly.
+    Ok(()) => Ok(()),
+    Err(e) => {
       let _ = start_output_ex(
         state,
         source,
@@ -1558,8 +2045,14 @@ fn reconfigure_output(
         Some(old_spec.h),
         Some(old_spec.fps),
         None,
+        old_fit,
+        caps.0,
+        caps.1,
       );
-      Err(format!("切换分辨率失败：{e2}"))
+      Err(format!(
+        "切换到 {} 失败：{e}。若伴侣正开着 FLYBOX，请先取消选择后再试。",
+        new_spec.label()
+      ))
     }
   }
 }
@@ -1626,6 +2119,8 @@ pub fn vcam_uninstall(state: tauri::State<'_, VcamState>) -> Result<(), String> 
 
 /// `source`: physical camera dshow name. Empty / null = test pattern bars.
 /// `width`/`height`/`fps`: output preset (default 1920×1080@30).
+/// `fit_mode`: OBS bounding-box style — `contain` | `cover` (keep aspect; no stretch).
+/// `max_width`/`max_height`: camera caps from list (avoids slow re-probe on start).
 #[tauri::command]
 pub fn vcam_start(
   state: tauri::State<'_, VcamState>,
@@ -1633,8 +2128,20 @@ pub fn vcam_start(
   width: Option<u32>,
   height: Option<u32>,
   fps: Option<u32>,
+  fit_mode: Option<String>,
+  max_width: Option<u32>,
+  max_height: Option<u32>,
 ) -> Result<(), String> {
-  start_output(&state, source, width, height, fps)
+  start_output(
+    &state,
+    source,
+    width,
+    height,
+    fps,
+    fit_mode,
+    max_width,
+    max_height,
+  )
 }
 
 /// Kept for compatibility; camera path is native ffmpeg (OBS-style), not UI JPEG.
@@ -1652,15 +2159,26 @@ pub fn vcam_stop(state: tauri::State<'_, VcamState>) -> Result<(), String> {
   stop_output(&state)
 }
 
-/// Change output resolution/fps while already running (companion may need reselect).
+/// Change output resolution/fps/fit while already running (companion may need reselect).
 #[tauri::command]
 pub fn vcam_reconfigure(
   state: tauri::State<'_, VcamState>,
   width: Option<u32>,
   height: Option<u32>,
   fps: Option<u32>,
+  fit_mode: Option<String>,
+  max_width: Option<u32>,
+  max_height: Option<u32>,
 ) -> Result<(), String> {
-  reconfigure_output(&state, width, height, fps)
+  reconfigure_output(
+    &state,
+    width,
+    height,
+    fps,
+    fit_mode,
+    max_width,
+    max_height,
+  )
 }
 
 #[cfg(test)]
@@ -1696,7 +2214,7 @@ mod tests {
     let state = VcamState::default();
     if !is_filter_registered() {
       // Still prove unregistered path refuses start.
-      let err = start_output(&state, None, None, None, None)
+      let err = start_output(&state, None, None, None, None, None, None, None)
         .expect_err("start must fail when unregistered");
       assert!(err.contains("安装") || err.contains("注册"), "{err}");
       return;
@@ -1706,8 +2224,17 @@ mod tests {
       return;
     }
 
-    start_output(&state, None, Some(1280), Some(720), Some(30))
-      .expect("start_output test pattern");
+    start_output(
+      &state,
+      None,
+      Some(1280),
+      Some(720),
+      Some(30),
+      None,
+      None,
+      None,
+    )
+    .expect("start_output test pattern");
     let mid = collect_status(&state).expect("status while running");
     assert!(mid.running, "running should be true after start");
     assert!(mid.source.is_none(), "test pattern has no physical source");
@@ -1753,11 +2280,124 @@ mod tests {
     // Do not assert mapping gone: parallel tests / running tauri dev share SHM name.
   }
 
+  /// Deep check: quality tier must change real SHM + status + res file (not just UI labels).
+  #[test]
+  fn quality_tier_changes_real_shm_geometry() {
+    if !is_filter_registered() {
+      eprintln!("skip: filter not registered");
+      return;
+    }
+    if shm_is_open() {
+      eprintln!("skip: SHM held by another process (close FLYBOX/companion first)");
+      return;
+    }
+
+    let state = VcamState::default();
+
+    // --- 720p ---
+    start_output(
+      &state,
+      None, // test pattern — pure canvas size, no camera clamp
+      Some(1280),
+      Some(720),
+      Some(30),
+      None,
+      None,
+      None,
+    )
+    .expect("start 720p");
+    thread::sleep(Duration::from_millis(250));
+
+    let st720 = collect_status(&state).expect("status 720");
+    assert!(st720.running, "should be running at 720p");
+    assert_eq!(st720.width, 1280, "status width must be 1280 at 720p");
+    assert_eq!(st720.height, 720, "status height must be 720 at 720p");
+
+    let shm720 = read_shm_geometry().expect("SHM must exist at 720p");
+    assert_eq!(shm720, (1280, 720), "SHM header must be 1280x720, got {shm720:?}");
+
+    let res720 = read_res_file_geometry().expect("res file after 720p");
+    assert_eq!(res720, (1280, 720), "res file must be 1280x720, got {res720:?}");
+
+    stop_output(&state).expect("stop 720p");
+    thread::sleep(Duration::from_millis(200));
+    assert!(!shm_is_open(), "SHM should release after stop");
+
+    // --- 1080p ---
+    start_output(
+      &state,
+      None,
+      Some(1920),
+      Some(1080),
+      Some(30),
+      None,
+      None,
+      None,
+    )
+    .expect("start 1080p");
+    thread::sleep(Duration::from_millis(250));
+
+    let st1080 = collect_status(&state).expect("status 1080");
+    assert!(st1080.running, "should be running at 1080p");
+    assert_eq!(st1080.width, 1920, "status width must be 1920 at 1080p");
+    assert_eq!(st1080.height, 1080, "status height must be 1080 at 1080p");
+
+    let shm1080 = read_shm_geometry().expect("SHM must exist at 1080p");
+    assert_eq!(
+      shm1080,
+      (1920, 1080),
+      "SHM header must be 1920x1080, got {shm1080:?}"
+    );
+
+    let res1080 = read_res_file_geometry().expect("res file after 1080p");
+    assert_eq!(res1080, (1920, 1080), "res file must be 1920x1080, got {res1080:?}");
+
+    // Prove the two tiers are not the same geometry.
+    assert_ne!(
+      shm720, shm1080,
+      "720p and 1080p SHM geometry must differ"
+    );
+
+    stop_output(&state).expect("stop 1080p");
+    eprintln!("OK: SHM 720p={shm720:?} → 1080p={shm1080:?} (quality tier is real)");
+  }
+
+  #[test]
+  fn dshow_list_options_picks_real_1080_not_tiny() {
+    let sample = r#"
+[dshow @ 0] DirectShow video device options
+[dshow @ 0]  Pin "Capture"
+[dshow @ 0]   pixel_format=yuyv422  min s=160x120 fps=5 max s=1920x1080 fps=30
+[dshow @ 0]   vcodec=mjpeg  min s=320x240 fps=5 max s=1920x1080 fps=30
+[dshow @ 0]   s=800x448 fps=30
+"#;
+    let (w, h) = parse_dshow_list_options_max(sample).expect("should find 1080p");
+    assert_eq!((w, h), (1920, 1080));
+    assert!(is_plausible_cam_max(w, h));
+    assert!(!is_plausible_cam_max(800, 448));
+  }
+
+  #[test]
+  fn fit_contain_letterboxes_wide_into_tall() {
+    // 4x2 white Y into 4x4 contain → top/bottom dark bars.
+    let sw = 4u32;
+    let sh = 2u32;
+    let mut src = vec![235u8; (sw * sh) as usize];
+    src.resize((sw * sh + sw * sh / 2) as usize, 128);
+    let out = scale_nv12_fit(&src, sw, sh, 4, 4, FitMode::Contain);
+    // Corners of canvas should stay near black (letterbox).
+    assert!(out[0] < 40, "top-left should be bar, got {}", out[0]);
+    assert!(out[4 * 3] < 40, "bottom row should be bar, got {}", out[4 * 3]);
+    // Middle content row should be bright.
+    assert!(out[4 * 1 + 1] > 200, "content should be bright");
+  }
+
   #[test]
   fn reconfigure_requires_running() {
     let state = VcamState::default();
-    let err = reconfigure_output(&state, Some(1280), Some(720), Some(30))
-      .expect_err("must fail when idle");
+    let err =
+      reconfigure_output(&state, Some(1280), Some(720), Some(30), None, None, None)
+        .expect_err("must fail when idle");
     assert!(err.contains("开始输出") || err.contains("切换"), "{err}");
   }
 
@@ -1771,9 +2411,28 @@ mod tests {
       eprintln!("skip reconfigure: SHM already held by another process");
       return;
     }
-    start_output(&state, None, Some(1280), Some(720), Some(30)).expect("start 720");
+    start_output(
+      &state,
+      None,
+      Some(1280),
+      Some(720),
+      Some(30),
+      None,
+      None,
+      None,
+    )
+    .expect("start 720");
     thread::sleep(Duration::from_millis(150));
-    reconfigure_output(&state, Some(1920), Some(1080), Some(30)).expect("to 1080");
+    reconfigure_output(
+      &state,
+      Some(1920),
+      Some(1080),
+      Some(30),
+      Some("contain".into()),
+      None,
+      None,
+    )
+    .expect("to 1080");
     thread::sleep(Duration::from_millis(200));
     let s = collect_status(&state).expect("status");
     assert!(s.running);
