@@ -722,6 +722,14 @@ pub fn run() {
                     .permission("allow-live-show-window")
                     .permission("allow-live-current-url")
                     .permission("allow-live-scrape")
+                    .permission("allow-vcam-status")
+                    .permission("allow-vcam-list-sources")
+                    .permission("allow-vcam-preview")
+                    .permission("allow-vcam-install")
+                    .permission("allow-vcam-uninstall")
+                    .permission("allow-vcam-start")
+                    .permission("allow-vcam-push-jpeg")
+                    .permission("allow-vcam-stop")
                     .permission("dialog:default")
                     .permission("clipboard-manager:allow-write-text")
                     .permission("clipboard-manager:allow-read-text")
@@ -825,9 +833,12 @@ pub fn run() {
             obs_ctrl::obs_sync_media_seek,
             obs_ctrl::obs_disconnect,
             vcam::vcam_status,
+            vcam::vcam_list_sources,
+            vcam::vcam_preview,
             vcam::vcam_install,
             vcam::vcam_uninstall,
             vcam::vcam_start,
+            vcam::vcam_push_jpeg,
             vcam::vcam_stop,
             midi_mtc::midi_list_ports,
             midi_mtc::midi_status,

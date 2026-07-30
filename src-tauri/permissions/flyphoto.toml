@@ -367,3 +367,43 @@ commands.allow = ["live_current_url"]
 identifier = "allow-live-scrape"
 description = "Allow evaluating scrape script in live WebView"
 commands.allow = ["live_scrape"]
+
+[[permission]]
+identifier = "allow-vcam-status"
+description = "Allow reading FLYBOX virtual camera status"
+commands.allow = ["vcam_status"]
+
+[[permission]]
+identifier = "allow-vcam-list-sources"
+description = "Allow listing physical cameras for virtual cam input"
+commands.allow = ["vcam_list_sources"]
+
+[[permission]]
+identifier = "allow-vcam-preview"
+description = "Allow reading virtual camera RGBA preview frames"
+commands.allow = ["vcam_preview"]
+
+[[permission]]
+identifier = "allow-vcam-install"
+description = "Allow installing/registering FLYBOX virtual camera filter"
+commands.allow = ["vcam_install"]
+
+[[permission]]
+identifier = "allow-vcam-uninstall"
+description = "Allow uninstalling FLYBOX virtual camera filter"
+commands.allow = ["vcam_uninstall"]
+
+[[permission]]
+identifier = "allow-vcam-start"
+description = "Allow starting virtual camera frame output"
+commands.allow = ["vcam_start"]
+
+[[permission]]
+identifier = "allow-vcam-push-jpeg"
+description = "Allow pushing JPEG camera frames into virtual cam"
+commands.allow = ["vcam_push_jpeg"]
+
+[[permission]]
+identifier = "allow-vcam-stop"
+description = "Allow stopping virtual camera frame output"
+commands.allow = ["vcam_stop"]

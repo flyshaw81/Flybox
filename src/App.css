@@ -8381,3 +8381,63 @@ html.is-resizing .darkveil-canvas {
   font-size: 0.85rem;
   line-height: 1.45;
 }
+.vcam-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #0a0a0c;
+  display: grid;
+  place-items: center;
+}
+.vcam-preview.on {
+  border-color: color-mix(in srgb, #3dd68c 40%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, #3dd68c 18%, transparent);
+}
+.vcam-preview-video,
+.vcam-preview-canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #000;
+}
+.vcam-preview-empty {
+  padding: 24px 18px;
+  text-align: center;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  max-width: 28em;
+}
+.vcam-preview-hint {
+  margin-top: 10px;
+}
+.vcam-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.vcam-source-select {
+  flex: 1 1 220px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--menu-hover) 70%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+}
+.vcam-source-select:disabled {
+  opacity: 0.55;
+}
+.vcam-onair {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #3dd68c;
+  margin-bottom: 8px;
+}
