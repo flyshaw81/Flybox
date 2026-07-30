@@ -563,8 +563,8 @@ fn nv12_to_rgba_half(nv12: &[u8], w: u32, h: u32) -> PreviewRgba {
 }
 
 fn publish_preview(preview: &Mutex<Option<PreviewRgba>>, nv12: &[u8], frame_n: u64) {
-  // ~10fps UI preview is enough; skip most frames for CPU.
-  if frame_n % 3 != 0 {
+  // UI thumbnail only (~10fps). SHM already received every frame at full rate.
+  if frame_n > 1 && frame_n % 3 != 0 {
     return;
   }
   let p = nv12_to_rgba_half(nv12, DEFAULT_W, DEFAULT_H);
@@ -575,15 +575,20 @@ fn publish_preview(preview: &Mutex<Option<PreviewRgba>>, nv12: &[u8], frame_n: u
 
 fn preview_to_data_url(p: &PreviewRgba) -> Option<String> {
   use base64::{engine::general_purpose::STANDARD as B64, Engine};
-  use image::{ImageBuffer, ImageFormat, Rgba};
-  let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-    ImageBuffer::from_raw(p.width, p.height, p.rgba.clone())?;
-  let mut jpeg = Vec::new();
+  use image::{ImageBuffer, RgbaImage};
+  if p.rgba.len() != (p.width * p.height * 4) as usize {
+    return None;
+  }
+  let img: RgbaImage = ImageBuffer::from_raw(p.width, p.height, p.rgba.clone())?;
+  let mut jpeg = Vec::with_capacity(64 * 1024);
   {
     let mut cursor = std::io::Cursor::new(&mut jpeg);
-    img
-      .write_to(&mut cursor, ImageFormat::Jpeg)
-      .ok()?;
+    // Slightly higher quality so room detail is visible in the UI panel.
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 80);
+    img.write_with_encoder(enc).ok()?;
+  }
+  if jpeg.is_empty() {
+    return None;
   }
   Some(format!("data:image/jpeg;base64,{}", B64.encode(&jpeg)))
 }
@@ -684,52 +689,159 @@ fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
   })
 }
 
-fn rgb_to_nv12(rgb: &[u8], w: u32, h: u32) -> Vec<u8> {
-  let y_size = (w * h) as usize;
-  let mut out = vec![0u8; y_size + y_size / 2];
-  // Y plane
-  for y in 0..h {
-    for x in 0..w {
-      let i = ((y * w + x) * 3) as usize;
-      let r = rgb[i] as i32;
-      let g = rgb[i + 1] as i32;
-      let b = rgb[i + 2] as i32;
-      let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-      out[(y * w + x) as usize] = yy.clamp(0, 255) as u8;
-    }
+/// Open physical camera via dshow (OBS-style native path). Full rate NV12 @ 1280×720.
+struct CameraCapture {
+  child: std::process::Child,
+  stdout: std::process::ChildStdout,
+  frame_size: usize,
+  first_frame: Vec<u8>,
+}
+
+impl Drop for CameraCapture {
+  fn drop(&mut self) {
+    let _ = self.child.kill();
+    let _ = self.child.wait();
   }
-  // UV plane (NV12 interleaved), 2x2 subsample
-  let uv = &mut out[y_size..];
-  for y in (0..h).step_by(2) {
-    for x in (0..w).step_by(2) {
-      let mut rs = 0i32;
-      let mut gs = 0i32;
-      let mut bs = 0i32;
-      let mut n = 0i32;
-      for dy in 0..2 {
-        for dx in 0..2 {
-          let xx = (x + dx).min(w - 1);
-          let yy = (y + dy).min(h - 1);
-          let i = ((yy * w + xx) * 3) as usize;
-          rs += rgb[i] as i32;
-          gs += rgb[i + 1] as i32;
-          bs += rgb[i + 2] as i32;
-          n += 1;
+}
+
+fn open_camera_capture(device: &str) -> Result<CameraCapture, String> {
+  let ffmpeg = ffmpeg_util::find_tool("ffmpeg.exe")
+    .or_else(|| ffmpeg_util::find_tool("ffmpeg"))
+    .ok_or_else(|| "找不到 ffmpeg.exe，无法采集摄像头".to_string())?;
+
+  // WebView must have released getUserMedia first (caller waits ~0.5s).
+  let input = format!("video={device}");
+  let vf = format!(
+    "scale={DEFAULT_W}:{DEFAULT_H}:force_original_aspect_ratio=decrease,pad={DEFAULT_W}:{DEFAULT_H}:(ow-iw)/2:(oh-ih)/2,format=nv12"
+  );
+
+  let mut child = ffmpeg_no_window(&ffmpeg)
+    .args([
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-fflags",
+      "nobuffer",
+      "-flags",
+      "low_delay",
+      "-f",
+      "dshow",
+      "-rtbufsize",
+      "100M",
+      "-framerate",
+      "30",
+      "-i",
+      &input,
+      "-an",
+      "-vf",
+      &vf,
+      "-r",
+      "30",
+      "-pix_fmt",
+      "nv12",
+      "-f",
+      "rawvideo",
+      "pipe:1",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| format!("启动摄像头采集失败: {e}"))?;
+
+  let mut stdout = child
+    .stdout
+    .take()
+    .ok_or_else(|| "ffmpeg 无 stdout".to_string())?;
+  let mut stderr = child.stderr.take();
+  let frame_size = (DEFAULT_W * DEFAULT_H * 3 / 2) as usize;
+  let mut buf = vec![0u8; frame_size];
+  let deadline = Instant::now() + Duration::from_secs(8);
+  let mut filled = 0usize;
+  while filled < frame_size {
+    if Instant::now() > deadline {
+      let mut err = String::new();
+      if let Some(ref mut e) = stderr {
+        let _ = e.read_to_string(&mut err);
+      }
+      let _ = child.kill();
+      let _ = child.wait();
+      return Err(if err.trim().is_empty() {
+        format!(
+          "无法打开摄像头「{device}」。请先关掉系统相机/其它占用，停止输出后再试。"
+        )
+      } else {
+        format!("无法打开摄像头「{device}」: {}", err.trim())
+      });
+    }
+    match stdout.read(&mut buf[filled..]) {
+      Ok(0) => {
+        let mut err = String::new();
+        if let Some(ref mut e) = stderr {
+          let _ = e.read_to_string(&mut err);
         }
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("摄像头「{device}」采集中断。{}", err.trim()));
       }
-      let r = rs / n;
-      let g = gs / n;
-      let b = bs / n;
-      let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-      let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-      let ui = ((y / 2) * w + x) as usize;
-      if ui + 1 < uv.len() {
-        uv[ui] = u.clamp(0, 255) as u8;
-        uv[ui + 1] = v.clamp(0, 255) as u8;
+      Ok(n) => filled += n,
+      Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+      Err(e) => {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("读摄像头帧失败: {e}"));
       }
     }
   }
-  out
+
+  Ok(CameraCapture {
+    child,
+    stdout,
+    frame_size,
+    first_frame: buf,
+  })
+}
+
+fn spawn_camera_thread(
+  stop: Arc<AtomicBool>,
+  frames: Arc<AtomicU64>,
+  preview: Arc<Mutex<Option<PreviewRgba>>>,
+  mut cam: CameraCapture,
+) -> Result<thread::JoinHandle<()>, String> {
+  write_res_file(DEFAULT_W, DEFAULT_H, DEFAULT_INTERVAL);
+  for _ in 0..10 {
+    if !shm_is_open() {
+      break;
+    }
+    thread::sleep(Duration::from_millis(50));
+  }
+  let mut writer = ShmWriter::create(DEFAULT_W, DEFAULT_H, DEFAULT_INTERVAL)?;
+
+  // First frame already in hand — publish immediately at full pipeline rate.
+  writer.write_nv12(&cam.first_frame, 0);
+  frames.store(1, Ordering::Relaxed);
+  publish_preview(&preview, &cam.first_frame, 1);
+
+  let handle = thread::spawn(move || {
+    let start = Instant::now();
+    let mut buf = vec![0u8; cam.frame_size];
+    // Full-rate path like OBS: pull native frames as fast as the device provides
+    // (ffmpeg is capped at 30fps). No sleep that starves the pipe.
+    while !stop.load(Ordering::SeqCst) {
+      match cam.stdout.read_exact(&mut buf) {
+        Ok(()) => {
+          let ts = start.elapsed().as_nanos() as u64 / 100;
+          writer.write_nv12(&buf, ts);
+          let n = frames.fetch_add(1, Ordering::Relaxed) + 1;
+          // UI thumbnail only (~10fps); SHM already got the full frame above.
+          publish_preview(&preview, &buf, n);
+        }
+        Err(_) => break,
+      }
+    }
+    let _ = cam.child.kill();
+    let _ = cam.child.wait();
+  });
+  Ok(handle)
 }
 
 fn start_output(state: &VcamState, source: Option<String>) -> Result<(), String> {
@@ -746,19 +858,25 @@ fn start_output(state: &VcamState, source: Option<String>) -> Result<(), String>
     }
   }
 
+  // OBS-style: open camera natively BEFORE advertising "running".
+  // Fail hard if device busy — never claim a camera while pushing test bars.
+  let camera = if let Some(ref name) = source {
+    Some(open_camera_capture(name)?)
+  } else {
+    None
+  };
+
   let mut g = lock(state)?;
   if g.running {
+    drop(camera);
     return Ok(());
   }
   let stop = Arc::new(AtomicBool::new(false));
   let frames = Arc::new(AtomicU64::new(0));
   let preview = Arc::new(Mutex::new(None));
-  let feed = Arc::new(Mutex::new(None));
 
-  // Real camera: UI holds getUserMedia and pushes JPEG frames (no ffmpeg exclusive grab).
-  // Test pattern: backend generates bars.
-  let join = if source.is_some() {
-    spawn_feed_thread(stop.clone(), frames.clone(), preview.clone(), feed.clone())?
+  let join = if let Some(cam) = camera {
+    spawn_camera_thread(stop.clone(), frames.clone(), preview.clone(), cam)?
   } else {
     spawn_push_thread(stop.clone(), frames.clone(), preview.clone())?
   };
@@ -767,81 +885,10 @@ fn start_output(state: &VcamState, source: Option<String>) -> Result<(), String>
   g.join = Some(join);
   g.frames = frames;
   g.preview = preview;
-  g.feed = feed;
+  g.feed = Arc::new(Mutex::new(None));
   g.source = source;
   g.warn = None;
   g.running = true;
-  Ok(())
-}
-
-fn spawn_feed_thread(
-  stop: Arc<AtomicBool>,
-  frames: Arc<AtomicU64>,
-  preview: Arc<Mutex<Option<PreviewRgba>>>,
-  feed: Arc<Mutex<Option<Vec<u8>>>>,
-) -> Result<thread::JoinHandle<()>, String> {
-  write_res_file(DEFAULT_W, DEFAULT_H, DEFAULT_INTERVAL);
-  for _ in 0..10 {
-    if !shm_is_open() {
-      break;
-    }
-    thread::sleep(Duration::from_millis(50));
-  }
-  let mut writer = ShmWriter::create(DEFAULT_W, DEFAULT_H, DEFAULT_INTERVAL)?;
-  // Placeholder until first frontend frame arrives (avoids companion gray).
-  {
-    let frame = make_nv12_test(DEFAULT_W, DEFAULT_H, 0);
-    writer.write_nv12(&frame, 0);
-    frames.store(1, Ordering::Relaxed);
-    publish_preview(&preview, &frame, 1);
-  }
-
-  let handle = thread::spawn(move || {
-    let start = Instant::now();
-    let mut last = make_nv12_test(DEFAULT_W, DEFAULT_H, 0);
-    let mut got_real = false;
-    while !stop.load(Ordering::SeqCst) {
-      if let Ok(guard) = feed.lock() {
-        if let Some(ref f) = *guard {
-          if f.len() == last.len() {
-            last.copy_from_slice(f);
-            got_real = true;
-          }
-        }
-      }
-      let ts = start.elapsed().as_nanos() as u64 / 100;
-      writer.write_nv12(&last, ts);
-      let n = frames.fetch_add(1, Ordering::Relaxed) + 1;
-      if got_real {
-        publish_preview(&preview, &last, n);
-      }
-      thread::sleep(Duration::from_millis(33));
-    }
-  });
-  Ok(handle)
-}
-
-/// Frontend pushes a JPEG snapshot of the live camera preview (~15fps).
-pub fn push_jpeg_frame(state: &VcamState, jpeg: Vec<u8>) -> Result<(), String> {
-  let g = lock(state)?;
-  if !g.running {
-    return Err("请先开始输出".into());
-  }
-  if g.source.is_none() {
-    return Ok(()); // test pattern mode ignores pushes
-  }
-  let img = image::load_from_memory(&jpeg).map_err(|e| format!("预览帧解码失败: {e}"))?;
-  let rgb = img
-    .resize_exact(
-      DEFAULT_W,
-      DEFAULT_H,
-      image::imageops::FilterType::Triangle,
-    )
-    .to_rgb8();
-  let nv12 = rgb_to_nv12(rgb.as_raw(), DEFAULT_W, DEFAULT_H);
-  if let Ok(mut feed) = g.feed.lock() {
-    *feed = Some(nv12);
-  }
   Ok(())
 }
 
@@ -881,13 +928,21 @@ pub fn vcam_list_sources() -> Result<Vec<VcamSource>, String> {
 /// Latest half-res JPEG preview of what is being pushed to FLYBOX Camera.
 #[tauri::command]
 pub fn vcam_preview(state: tauri::State<'_, VcamState>) -> Result<Option<VcamPreview>, String> {
-  let g = lock(&state)?;
-  let guard = g
-    .preview
-    .lock()
-    .map_err(|_| "preview lock poisoned".to_string())?;
-  Ok(guard.as_ref().and_then(|p| {
-    let data_url = preview_to_data_url(p)?;
+  // Clone pixels under a short lock, then encode outside the mutex.
+  let snap = {
+    let g = lock(&state)?;
+    let guard = g
+      .preview
+      .lock()
+      .map_err(|_| "preview lock poisoned".to_string())?;
+    guard.as_ref().map(|p| PreviewRgba {
+      width: p.width,
+      height: p.height,
+      rgba: p.rgba.clone(),
+    })
+  };
+  Ok(snap.and_then(|p| {
+    let data_url = preview_to_data_url(&p)?;
     Some(VcamPreview {
       width: p.width,
       height: p.height,
@@ -929,12 +984,14 @@ pub fn vcam_start(
   start_output(&state, source)
 }
 
+/// Kept for compatibility; camera path is native ffmpeg (OBS-style), not UI JPEG.
 #[tauri::command]
 pub fn vcam_push_jpeg(
-  state: tauri::State<'_, VcamState>,
-  jpeg: Vec<u8>,
+  _state: tauri::State<'_, VcamState>,
+  _jpeg: Option<Vec<u8>>,
+  _jpeg_base64: Option<String>,
 ) -> Result<(), String> {
-  push_jpeg_frame(&state, jpeg)
+  Ok(())
 }
 
 #[tauri::command]

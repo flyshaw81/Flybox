@@ -24,6 +24,12 @@ type VcamStatus = {
 
 type VcamSource = { name: string };
 
+type VcamPreview = {
+  width: number;
+  height: number;
+  dataUrl: string;
+};
+
 type Props = {
   embedded?: boolean;
   onChromeChange?: (chrome: ModuleChrome | null) => void;
@@ -31,6 +37,7 @@ type Props = {
 
 const TEST_VALUE = "__test__";
 
+/** Local idle-only bars. NEVER use while native output is running. */
 function drawTestPattern(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -56,11 +63,11 @@ function drawTestPattern(
   const barX = (tick * 4) % Math.max(1, w - 48);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(barX, h / 3, 48, h / 3);
-  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
   ctx.fillRect(0, h - 28, w, 28);
   ctx.fillStyle = "#fff";
   ctx.font = "12px system-ui,sans-serif";
-  ctx.fillText("FLYBOX · test pattern", 10, h - 10);
+  ctx.fillText("FLYBOX · test pattern (idle only)", 10, h - 10);
 }
 
 export default function VcamModule({ embedded, onChromeChange }: Props) {
@@ -74,12 +81,14 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
   const [previewKind, setPreviewKind] = useState<"video" | "canvas" | "empty">(
     "empty",
   );
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const grabRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  /** Bumps on every preview mode change — kills stale rAF / intervals. */
+  const previewGenRef = useRef(0);
   const rafRef = useRef(0);
-  const pushTimerRef = useRef(0);
+  const intervalRef = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -96,9 +105,7 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       const list = await invoke<VcamSource[]>("vcam_list_sources");
       setSources(list);
       setSelected((prev) => {
-        if (prev !== TEST_VALUE && list.some((x) => x.name === prev)) {
-          return prev;
-        }
+        if (prev !== TEST_VALUE && list.some((x) => x.name === prev)) return prev;
         return list[0]?.name ?? TEST_VALUE;
       });
     } catch (e) {
@@ -107,24 +114,38 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
     }
   }, []);
 
-  function stopPushLoop() {
-    if (pushTimerRef.current) {
-      window.clearInterval(pushTimerRef.current);
-      pushTimerRef.current = 0;
+  function killPreviewWork() {
+    previewGenRef.current += 1;
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+    }
+    if (intervalRef.current) {
+      window.clearInterval(intervalRef.current);
+      intervalRef.current = 0;
     }
   }
 
-  function releasePreviewCamera() {
-    stopPushLoop();
+  function releaseCamera() {
     if (streamRef.current) {
       for (const tr of streamRef.current.getTracks()) tr.stop();
       streamRef.current = null;
     }
-    if (videoRef.current) videoRef.current.srcObject = null;
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
   }
 
-  async function openPhysicalCamera(name: string): Promise<MediaStream> {
-    // Permission + labels
+  function clearCanvas(color = "#0a0a0c") {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  async function openPhysicalCamera(name: string): Promise<void> {
     try {
       const tmp = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -132,7 +153,7 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       });
       for (const tr of tmp.getTracks()) tr.stop();
     } catch {
-      /* continue */
+      /* ignore */
     }
     const devices = await navigator.mediaDevices.enumerateDevices();
     const cam = devices.find(
@@ -158,67 +179,25 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       videoRef.current.srcObject = stream;
       await videoRef.current.play().catch(() => undefined);
     }
-    return stream;
   }
 
-  function startJpegPushLoop() {
-    stopPushLoop();
-    if (!grabRef.current) {
-      grabRef.current = document.createElement("canvas");
-    }
-    const grab = grabRef.current;
-    grab.width = 1280;
-    grab.height = 720;
-    const ctx = grab.getContext("2d");
-    if (!ctx) return;
-
-    let pushing = false;
-    pushTimerRef.current = window.setInterval(() => {
-      if (pushing) return;
-      const video = videoRef.current;
-      if (!video || video.readyState < 2) return;
-      pushing = true;
-      try {
-        ctx.drawImage(video, 0, 0, 1280, 720);
-        grab.toBlob(
-          (blob) => {
-            if (!blob) {
-              pushing = false;
-              return;
-            }
-            void blob
-              .arrayBuffer()
-              .then((ab) =>
-                invoke("vcam_push_jpeg", {
-                  jpeg: Array.from(new Uint8Array(ab)),
-                }),
-              )
-              .catch(() => undefined)
-              .finally(() => {
-                pushing = false;
-              });
-          },
-          "image/jpeg",
-          0.72,
-        );
-      } catch {
-        pushing = false;
-      }
-    }, 66); // ~15 fps
-  }
-
+  /**
+   * OBS-style start:
+   * 1) fully release WebView camera
+   * 2) Rust/ffmpeg opens dshow at full 30fps → SHM
+   * UI only polls a lightweight thumbnail (does not feed the pipe).
+   */
   async function startOutput(sourceName: string) {
-    if (sourceName === TEST_VALUE) {
-      releasePreviewCamera();
-      await invoke("vcam_start", { source: null });
-      return;
-    }
-    // Keep WebView camera open — backend no longer grabs dshow exclusively.
-    if (!streamRef.current) {
-      await openPhysicalCamera(sourceName);
-    }
-    await invoke("vcam_start", { source: sourceName });
-    startJpegPushLoop();
+    killPreviewWork();
+    releaseCamera();
+    setPreviewKind("canvas");
+    clearCanvas();
+    setPreviewHint(t("vcamPreviewConnecting"));
+    // Let Windows release the device pin before ffmpeg opens it.
+    await new Promise((r) => window.setTimeout(r, 600));
+    await invoke("vcam_start", {
+      source: sourceName === TEST_VALUE ? null : sourceName,
+    });
   }
 
   useEffect(() => {
@@ -227,10 +206,12 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
   }, [refresh, loadSources]);
 
   useEffect(() => {
-    const ms = status?.running ? 1000 : 2500;
-    const id = window.setInterval(() => {
-      void refresh();
-    }, ms);
+    const id = window.setInterval(
+      () => {
+        void refresh();
+      },
+      status?.running ? 3000 : 4000,
+    );
     return () => window.clearInterval(id);
   }, [refresh, status?.running]);
 
@@ -247,110 +228,211 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
     return () => onChromeChange(null);
   }, [embedded, onChromeChange, t, status?.running, status?.installed]);
 
-  // Preview management
+  // Preview modes — always kill previous work first (gen token).
   useEffect(() => {
-    let cancelled = false;
+    const gen = ++previewGenRef.current;
+    const alive = () => gen === previewGenRef.current;
 
-    function stopRaf() {
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = 0;
-      }
+    // Cancel any previous rAF / interval from older gen.
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+    }
+    if (intervalRef.current) {
+      window.clearInterval(intervalRef.current);
+      intervalRef.current = 0;
     }
 
-    function startPattern(hint: string) {
-      stopRaf();
-      setPreviewKind("canvas");
-      setPreviewHint(hint);
-      requestAnimationFrame(() => {
-        if (cancelled) return;
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        let tick = 0;
-        const loop = () => {
-          if (cancelled) return;
-          drawTestPattern(ctx, canvas.width, canvas.height, tick++);
-          rafRef.current = requestAnimationFrame(loop);
-        };
-        loop();
-      });
-    }
+    const running = !!status?.running;
+    const activeSource = status?.source || null;
+    const pick = selected;
 
-    async function setup() {
-      stopRaf();
-      const running = !!status?.running;
-      const activeSource = status?.source || null;
-      const pick = selected;
-
-      if (busy && !running) {
-        setPreviewHint(t("vcamPreviewConnecting"));
-        return;
-      }
-
-      if (running && activeSource) {
-        // Real camera: keep video element + push loop
-        setPreviewHint(
-          `${t("vcamPreviewLiveHint")} (${activeSource} → FLYBOX Camera)`,
-        );
-        if (!streamRef.current) {
-          try {
-            await openPhysicalCamera(activeSource);
-          } catch (e) {
-            if (!cancelled) setErr(String(e));
-            return;
-          }
-        } else {
-          setPreviewKind("video");
-        }
-        if (!pushTimerRef.current) startJpegPushLoop();
-        return;
-      }
-
-      if (running && !activeSource) {
-        // Test pattern from backend — show local bars matching output
-        stopPushLoop();
-        startPattern(t("vcamPreviewPatternHint"));
-        return;
-      }
-
-      // Idle
-      stopPushLoop();
-      if (pick === TEST_VALUE) {
-        releasePreviewCamera();
-        startPattern(t("vcamPreviewIdleTest"));
-        return;
-      }
-
+    if (busy && !running) {
       setPreviewHint(t("vcamPreviewConnecting"));
-      try {
-        if (
-          !streamRef.current ||
-          streamRef.current.getVideoTracks()[0]?.label !== pick
-        ) {
-          releasePreviewCamera();
-          await openPhysicalCamera(pick);
-        } else {
+      return () => {
+        previewGenRef.current += 1;
+      };
+    }
+
+    // —— Running: Rust writes SHM at full rate. Preview = read virtual device
+    // (same as companion) OR backend JPEG thumbnail as fallback. ——
+    if (running) {
+      releaseCamera();
+      setPreviewKind("canvas");
+      clearCanvas("#111");
+      setPreviewHint(
+        activeSource
+          ? `${t("vcamPreviewLiveHint")} (${activeSource} → FLYBOX Camera)`
+          : t("vcamPreviewPatternHint"),
+      );
+
+      const img = new Image();
+      let usingVideo = false;
+
+      const paintBackendThumb = async () => {
+        if (!alive() || usingVideo || document.hidden) return;
+        try {
+          const p = await invoke<VcamPreview | null>("vcam_preview");
+          if (!alive() || !p?.dataUrl) return;
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject();
+            img.src = p.dataUrl;
+          }).catch(() => undefined);
+          if (!alive() || usingVideo) return;
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          if (canvas.width !== p.width || canvas.height !== p.height) {
+            canvas.width = p.width;
+            canvas.height = p.height;
+          }
+          const ctx = canvas.getContext("2d");
+          ctx?.drawImage(img, 0, 0, p.width, p.height);
+        } catch {
+          /* ignore */
+        }
+      };
+
+      const tryOpenVirtualCam = async (): Promise<boolean> => {
+        try {
+          // Unlock labels
+          try {
+            const tmp = await navigator.mediaDevices.getUserMedia({
+              video: true,
+              audio: false,
+            });
+            for (const tr of tmp.getTracks()) tr.stop();
+          } catch {
+            /* ignore */
+          }
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const cam = devices.find(
+            (d) =>
+              d.kind === "videoinput" &&
+              /FLYBOX\s*Camera/i.test(d.label || ""),
+          );
+          if (!cam?.deviceId) return false;
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              deviceId: { exact: cam.deviceId },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+          if (!alive()) {
+            for (const tr of stream.getTracks()) tr.stop();
+            return false;
+          }
+          streamRef.current = stream;
+          usingVideo = true;
           setPreviewKind("video");
+          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            await videoRef.current.play().catch(() => undefined);
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      // Virtual cam is a reader pin — multiple clients OK (companion + us).
+      // Retry: filter may need a moment after SHM becomes READY.
+      void (async () => {
+        for (let i = 0; i < 12 && alive(); i++) {
+          if (await tryOpenVirtualCam()) return;
+          await new Promise((r) => window.setTimeout(r, 400));
+        }
+        // Fallback: backend half-res JPEG thumbs
+        void paintBackendThumb();
+        intervalRef.current = window.setInterval(() => {
+          void paintBackendThumb();
+        }, 200);
+      })();
+
+      return () => {
+        if (intervalRef.current) {
+          window.clearInterval(intervalRef.current);
+          intervalRef.current = 0;
+        }
+        releaseCamera();
+      };
+    }
+
+    // —— Idle: local physical preview OR local test bars only. ——
+    releaseCamera();
+
+    if (pick === TEST_VALUE) {
+      setPreviewKind("canvas");
+      setPreviewHint(t("vcamPreviewIdleTest"));
+      const loop = (tick: number) => {
+        if (!alive()) return;
+        const c = canvasRef.current;
+        if (!c) {
+          rafRef.current = requestAnimationFrame(() => loop(tick));
+          return;
+        }
+        const ctx = c.getContext("2d");
+        if (ctx) drawTestPattern(ctx, c.width, c.height, tick);
+        rafRef.current = requestAnimationFrame(() => loop(tick + 1));
+      };
+      rafRef.current = requestAnimationFrame(() => loop(0));
+      return () => {
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        rafRef.current = 0;
+      };
+    }
+
+    setPreviewHint(t("vcamPreviewConnecting"));
+    void (async () => {
+      try {
+        await openPhysicalCamera(pick);
+        if (!alive()) {
+          releaseCamera();
+          return;
         }
         setPreviewHint(`${t("vcamPreviewSourceHint")} ${pick}`);
       } catch {
-        if (!cancelled) startPattern(t("vcamPreviewSourceFail"));
+        if (!alive()) return;
+        setPreviewKind("canvas");
+        setPreviewHint(t("vcamPreviewSourceFail"));
+        const loop = (tick: number) => {
+          if (!alive()) return;
+          const c = canvasRef.current;
+          if (!c) {
+            rafRef.current = requestAnimationFrame(() => loop(tick));
+            return;
+          }
+          const ctx = c.getContext("2d");
+          if (ctx) drawTestPattern(ctx, c.width, c.height, tick);
+          rafRef.current = requestAnimationFrame(() => loop(tick + 1));
+        };
+        rafRef.current = requestAnimationFrame(() => loop(0));
       }
-    }
+    })();
 
-    void setup();
     return () => {
-      cancelled = true;
-      stopRaf();
+      previewGenRef.current += 1;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = 0;
+      }
+      // Don't release camera here if a newer gen already re-opened it —
+      // gen bump handles invalidation; release only when leaving module.
     };
   }, [status?.running, status?.source, selected, busy, t]);
 
-  // Stop push when not running
+  // On unmount: free camera
   useEffect(() => {
-    if (!status?.running) stopPushLoop();
-  }, [status?.running]);
+    return () => {
+      killPreviewWork();
+      releaseCamera();
+    };
+  }, []);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -416,12 +498,6 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       <section className="vcam-card">
         <div className="vcam-card-label">{t("vcamPreviewTitle")}</div>
         <div className={`vcam-preview ${running ? "on" : ""}`}>
-          {previewKind === "empty" ? (
-            <div className="vcam-preview-empty">
-              <div className="vcam-onair">{t("vcamOnAir")}</div>
-              <div className="muted">{status?.source}</div>
-            </div>
-          ) : null}
           <video
             ref={videoRef}
             className="vcam-preview-video"
@@ -435,7 +511,7 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
             className="vcam-preview-canvas"
             width={640}
             height={360}
-            style={{ display: previewKind === "canvas" ? "block" : "none" }}
+            style={{ display: previewKind !== "video" ? "block" : "none" }}
           />
         </div>
         {previewHint ? (
@@ -538,7 +614,8 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
               disabled={!canStop}
               onClick={() =>
                 void run(async () => {
-                  stopPushLoop();
+                  killPreviewWork();
+                  releaseCamera();
                   await invoke("vcam_stop");
                 })
               }
