@@ -11,6 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
@@ -38,3 +39,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 obws = "0.14"
 midir = "0.10"
 time = "0.3"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+] }

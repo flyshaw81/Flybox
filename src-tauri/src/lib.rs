@@ -6,6 +6,8 @@ mod obs_ctrl;
 mod sfx;
 mod vault;
 mod vcam;
+#[cfg(windows)]
+mod vcam_mf;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use include_dir::{include_dir, Dir};
@@ -730,6 +732,7 @@ pub fn run() {
                     .permission("allow-vcam-start")
                     .permission("allow-vcam-push-jpeg")
                     .permission("allow-vcam-stop")
+                    .permission("allow-vcam-reconfigure")
                     .permission("dialog:default")
                     .permission("clipboard-manager:allow-write-text")
                     .permission("clipboard-manager:allow-read-text")
@@ -840,6 +843,7 @@ pub fn run() {
             vcam::vcam_start,
             vcam::vcam_push_jpeg,
             vcam::vcam_stop,
+            vcam::vcam_reconfigure,
             midi_mtc::midi_list_ports,
             midi_mtc::midi_status,
             midi_mtc::midi_configure,

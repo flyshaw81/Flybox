@@ -20,6 +20,8 @@ type VcamStatus = {
   height?: number;
   fps?: number;
   warn?: string | null;
+  /** mf | ffmpeg | test */
+  captureBackend?: string | null;
   message: string;
   sourceNote: string;
   dllPath?: string | null;
@@ -32,6 +34,15 @@ const RES_PRESETS = [
   { id: "720p30", label: "1280×720 · 30fps", w: 1280, h: 720, fps: 30 },
   { id: "720p60", label: "1280×720 · 60fps", w: 1280, h: 720, fps: 60 },
 ] as const;
+
+function presetIdFor(w?: number, h?: number, fps?: number): string | null {
+  if (!w || !h) return null;
+  const f = fps ?? 30;
+  const hit = RES_PRESETS.find((p) => p.w === w && p.h === h && p.fps === f);
+  if (hit) return hit.id;
+  const near = RES_PRESETS.find((p) => p.w === w && p.h === h);
+  return near?.id ?? null;
+}
 
 type VcamSource = { name: string };
 
@@ -115,6 +126,21 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
       const s = await invoke<VcamStatus>("vcam_status");
       setStatus(s);
       setErr(null);
+      // Keep resolution dropdown in sync with actual backend spec (fallback/reconfigure).
+      if (s.running) {
+        const id = presetIdFor(s.width, s.height, s.fps);
+        if (id) {
+          setResId((prev) => {
+            if (prev === id) return prev;
+            try {
+              localStorage.setItem("flybox.vcam.res", id);
+            } catch {
+              /* ignore */
+            }
+            return id;
+          });
+        }
+      }
     } catch (e) {
       setErr(String(e));
     }
@@ -526,15 +552,38 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
           <select
             className="vcam-source-select"
             value={resId}
-            disabled={busy || running}
+            disabled={busy}
             onChange={(e) => {
               const v = e.target.value;
+              const prev = resId;
               setResId(v);
               try {
                 localStorage.setItem("flybox.vcam.res", v);
               } catch {
                 /* ignore */
               }
+              if (!running || busy) return;
+              const preset =
+                RES_PRESETS.find((p) => p.id === v) ?? RES_PRESETS[0];
+              void run(async () => {
+                setPreviewHint(t("vcamResSwitching"));
+                try {
+                  await invoke("vcam_reconfigure", {
+                    width: preset.w,
+                    height: preset.h,
+                    fps: preset.fps,
+                  });
+                  setPreviewHint(t("vcamResSwitchOk"));
+                } catch (err) {
+                  setResId(prev);
+                  try {
+                    localStorage.setItem("flybox.vcam.res", prev);
+                  } catch {
+                    /* ignore */
+                  }
+                  throw err;
+                }
+              });
             }}
           >
             {RES_PRESETS.map((p) => (
@@ -544,7 +593,9 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
             ))}
           </select>
         </div>
-        <p className="muted vcam-note">{t("vcamResHint")}</p>
+        <p className="muted vcam-note">
+          {running ? t("vcamResHintLive") : t("vcamResHint")}
+        </p>
       </section>
 
       <section className="vcam-card">
@@ -592,6 +643,20 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
               <strong>
                 {status.running && status.width && status.height
                   ? `${status.width}×${status.height} @ ${status.fps ?? 30}fps`
+                  : "—"}
+              </strong>
+            </li>
+            <li>
+              <span className="muted">{t("vcamCaptureMode")}</span>
+              <strong>
+                {status.running
+                  ? status.captureBackend === "mf"
+                    ? t("vcamCaptureMf")
+                    : status.captureBackend === "ffmpeg"
+                      ? t("vcamCaptureFfmpeg")
+                      : status.captureBackend === "test"
+                        ? t("vcamSourceTest")
+                        : "—"
                   : "—"}
               </strong>
             </li>

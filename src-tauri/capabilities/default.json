@@ -102,6 +102,7 @@
     "allow-vcam-start",
     "allow-vcam-push-jpeg",
     "allow-vcam-stop",
+    "allow-vcam-reconfigure",
     "opener:default",
     "dialog:default",
     "clipboard-manager:allow-write-text",

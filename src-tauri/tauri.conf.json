@@ -32,7 +32,13 @@
     "resources": [
       "vendor/bass/*",
       "vendor/ffmpeg/ffmpeg.exe",
-      "vendor/ffmpeg/ffprobe.exe"
-    ]
+      "vendor/ffmpeg/ffprobe.exe",
+      "resources/vcam/flybox-virtualcam-module64.dll"
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
   }
 }

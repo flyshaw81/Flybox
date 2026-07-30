@@ -407,3 +407,8 @@ commands.allow = ["vcam_push_jpeg"]
 identifier = "allow-vcam-stop"
 description = "Allow stopping virtual camera frame output"
 commands.allow = ["vcam_stop"]
+
+[[permission]]
+identifier = "allow-vcam-reconfigure"
+description = "Allow hot-switching virtual camera resolution/fps while running"
+commands.allow = ["vcam_reconfigure"]

@@ -14,6 +14,8 @@ dist-ssr
 
 # Virtual cam intermediate CMake build (keep src-vcam/dist DLL)
 src-vcam/build/
+# Copied from src-vcam/dist by src-tauri/build.rs for NSIS resources
+src-tauri/resources/vcam/
 
 # Editor directories and files
 .vscode/*

@@ -43,8 +43,15 @@ FLYBOX UI（顶栏 → 虚拟摄像头）
 - [x] 真机原生采集（ffmpeg/dshow）+ 满帧率 SHM；预览读虚拟设备
 - [x] 输出预设：1080p30/60、720p30/60；过滤器预宣告多分辨率
 - [x] 画质：lanczos/full-chroma；MJPEG/原生阶梯；采集线程高优先级；断线重连
+- [x] 规格降级（1080p60→1080p30→720p30）；res 文件原子写；队列 type=VIDEO
+- [x] **B** Rust FFI 直链 `video_queue_*`（与过滤器同一份 C，已删手写 ShmWriter）
+- [x] **C** 输出中热切换：L1 重建 SHM + L2 伴侣占线缩放兜底（不断输出）
+- [x] **A** 安装包 resources 捆绑 DLL + NSIS `hooks.nsh` regsvr32
+- [x] **D1** 进程内 MF：采集线程内 COM + stride 打包 NV12；失败回退 ffmpeg
+- [x] 状态显示采集方式；UI 规格与后端同步；单测 SHM 占用时 skip
+- [ ] **D2** D3D/GPU 路径（可选增强）
+- [ ] 无音频虚拟设备（Windows OBS vcam 也主要是视频）
 - [ ] P3 抖音直播伴侣完整验收（需本机伴侣 + 人工点选）
-- [ ] P4 安装包捆绑 DLL
 - [ ] P5 上架前公开 GPL 仓
 
 ## 编译 DLL

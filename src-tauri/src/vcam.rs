@@ -73,9 +73,9 @@ pub struct VcamState {
 
 struct VcamInner {
   running: bool,
-  /// Physical camera dshow name currently feeding SHM, or None = test pattern.
+  /// Physical camera name currently feeding SHM, or None = test pattern.
   source: Option<String>,
-  /// Active output size/fps (for status + companion negotiation).
+  /// Active SHM / companion output size/fps.
   spec: OutputSpec,
   /// Warning shown when we had to fall back (should stay empty if start fails hard).
   warn: Option<String>,
@@ -85,6 +85,8 @@ struct VcamInner {
   frames: Arc<AtomicU64>,
   /// Latest UI preview (RGBA, half-res).
   preview: Arc<Mutex<Option<PreviewRgba>>>,
+  /// `mf` | `ffmpeg` | `test` while running.
+  capture_backend: Option<String>,
 }
 
 struct PreviewRgba {
@@ -105,6 +107,7 @@ impl Default for VcamState {
         join: None,
         frames: Arc::new(AtomicU64::new(0)),
         preview: Arc::new(Mutex::new(None)),
+        capture_backend: None,
       }),
     }
   }
@@ -135,6 +138,8 @@ pub struct VcamStatus {
   pub fps: u32,
   /// Non-empty when output is test bars after a camera problem (or similar).
   pub warn: Option<String>,
+  /// `mf` | `ffmpeg` | `test` while running; null when idle.
+  pub capture_backend: Option<String>,
   pub message: String,
   pub source_note: String,
   pub dll_path: Option<String>,
@@ -157,11 +162,26 @@ fn dll_candidates() -> Vec<PathBuf> {
   let mut out = Vec::new();
   if let Ok(exe) = std::env::current_exe() {
     if let Some(dir) = exe.parent() {
+      // Dev (build.rs copy) + installed layout.
       out.push(dir.join("flybox-virtualcam-module64.dll"));
       out.push(dir.join("vcam").join("flybox-virtualcam-module64.dll"));
+      // Tauri NSIS resources preserve path under resources/.
+      out.push(
+        dir
+          .join("resources")
+          .join("vcam")
+          .join("flybox-virtualcam-module64.dll"),
+      );
+      out.push(dir.join("resources").join("flybox-virtualcam-module64.dll"));
     }
   }
   let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  out.push(
+    manifest
+      .join("resources")
+      .join("vcam")
+      .join("flybox-virtualcam-module64.dll"),
+  );
   out.push(
     manifest
       .join("..")
@@ -246,11 +266,20 @@ fn elevate_regsvr32(dll: &Path, uninstall: bool) -> Result<(), String> {
   Ok(())
 }
 
+/// OBS uses os_quick_write_utf8_file_safe (tmp + replace). Same idea here so
+/// companion never reads a half-written size string.
 fn write_res_file(w: u32, h: u32, interval: u64) {
   if let Ok(base) = std::env::var("APPDATA") {
-    let path = PathBuf::from(base).join("flybox-virtualcam.txt");
+    let dir = PathBuf::from(base);
+    let path = dir.join("flybox-virtualcam.txt");
+    let tmp = dir.join("flybox-virtualcam.txt.tmp");
     let body = format!("{w}x{h}x{interval}");
-    let _ = fs::write(path, body);
+    if fs::write(&tmp, body.as_bytes()).is_ok() {
+      let _ = fs::rename(&tmp, &path).or_else(|_| {
+        let _ = fs::remove_file(&path);
+        fs::rename(&tmp, &path)
+      });
+    }
   }
 }
 
@@ -285,6 +314,33 @@ fn decode_ffmpeg_bytes(bytes: &[u8]) -> String {
   String::from_utf8_lossy(bytes).into_owned()
 }
 
+/* ---- OBS video_queue (same C as filter; linked via build.rs) ---- */
+
+#[repr(C)]
+struct video_queue_t {
+  _opaque: [u8; 0],
+}
+
+// Linked by build.rs (`cc` → static lib `flybox_video_queue`).
+extern "C" {
+  fn video_queue_create(cx: u32, cy: u32, interval: u64) -> *mut video_queue_t;
+  fn video_queue_close(vq: *mut video_queue_t);
+  fn video_queue_write(
+    vq: *mut video_queue_t,
+    data: *mut *mut u8,
+    linesize: *mut u32,
+    timestamp: u64,
+  );
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+  fn OpenFileMappingW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
+  fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+}
+
+const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
+
 fn shm_is_open() -> bool {
   let wide: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
   unsafe {
@@ -298,155 +354,52 @@ fn shm_is_open() -> bool {
   }
 }
 
-/* ---- shared memory writer (layout matches OBS shared-memory-queue.c) ---- */
-
-#[repr(C)]
-struct QueueHeader {
-  write_idx: u32,
-  read_idx: u32,
-  state: u32,
-  offsets: [u32; 3],
-  qtype: u32,
+/// Thin Rust owner around OBS `video_queue_create` / `write` / `close`.
+struct VideoQueueWriter {
+  ptr: *mut video_queue_t,
   cx: u32,
   cy: u32,
-  interval: u64,
-  reserved: [u32; 8],
 }
 
-const SHARED_QUEUE_STATE_STARTING: u32 = 1;
-const SHARED_QUEUE_STATE_READY: u32 = 2;
-const SHARED_QUEUE_STATE_STOPPING: u32 = 3;
-const FRAME_HEADER_SIZE: u32 = 32;
+unsafe impl Send for VideoQueueWriter {}
 
-struct ShmWriter {
-  map: *mut std::ffi::c_void,
-  view: *mut u8,
-  frame_size: u32,
-  offsets: [u32; 3],
-}
-
-unsafe impl Send for ShmWriter {}
-
-#[link(name = "kernel32")]
-extern "system" {
-  fn CreateFileMappingW(
-    h: *mut std::ffi::c_void,
-    attr: *const std::ffi::c_void,
-    protect: u32,
-    max_high: u32,
-    max_low: u32,
-    name: *const u16,
-  ) -> *mut std::ffi::c_void;
-  fn OpenFileMappingW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
-  fn MapViewOfFile(
-    h: *mut std::ffi::c_void,
-    access: u32,
-    off_high: u32,
-    off_low: u32,
-    bytes: usize,
-  ) -> *mut std::ffi::c_void;
-  fn UnmapViewOfFile(p: *const std::ffi::c_void) -> i32;
-  fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
-}
-
-const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
-const PAGE_READWRITE: u32 = 0x04;
-const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
-
-impl ShmWriter {
+impl VideoQueueWriter {
   fn create(cx: u32, cy: u32, interval: u64) -> Result<Self, String> {
-    let frame_size = cx * cy * 3 / 2;
-    let mut size = std::mem::size_of::<QueueHeader>() as u32;
-    size = (size + 31) & !31;
-    let mut offsets = [0u32; 3];
-    for i in 0..3 {
-      offsets[i] = size;
-      size += frame_size + FRAME_HEADER_SIZE;
-      size = (size + 31) & !31;
+    let ptr = unsafe { video_queue_create(cx, cy, interval) };
+    if ptr.is_null() {
+      return Err("虚拟摄像头共享内存已被占用，请先停止其他输出".into());
     }
-
-    let wide: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-      let existing = OpenFileMappingW(FILE_MAP_ALL_ACCESS, 0, wide.as_ptr());
-      if !existing.is_null() {
-        CloseHandle(existing);
-        return Err("虚拟摄像头共享内存已被占用，请先停止其他输出".into());
-      }
-
-      let map = CreateFileMappingW(
-        INVALID_HANDLE_VALUE,
-        std::ptr::null(),
-        PAGE_READWRITE,
-        0,
-        size,
-        wide.as_ptr(),
-      );
-      if map.is_null() {
-        return Err("CreateFileMapping 失败".into());
-      }
-      let view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, 0) as *mut u8;
-      if view.is_null() {
-        CloseHandle(map);
-        return Err("MapViewOfFile 失败".into());
-      }
-
-      // Zero entire mapping then fill header with volatile stores.
-      std::ptr::write_bytes(view, 0, size as usize);
-      // layout: write/read/state @0/4/8, offsets@12, type@24, cx@28, cy@32, interval@40
-      std::ptr::write_volatile(view.add(8) as *mut u32, SHARED_QUEUE_STATE_STARTING);
-      for (i, off) in offsets.iter().enumerate() {
-        std::ptr::write_volatile(view.add(12 + i * 4) as *mut u32, *off);
-      }
-      std::ptr::write_volatile(view.add(28) as *mut u32, cx);
-      std::ptr::write_volatile(view.add(32) as *mut u32, cy);
-      std::ptr::write_volatile(view.add(40) as *mut u64, interval);
-
-      Ok(Self {
-        map,
-        view,
-        frame_size,
-        offsets,
-      })
-    }
+    Ok(Self { ptr, cx, cy })
   }
 
-  /// Mirror OBS `video_queue_write`: stamp → Y → UV → publish indices → READY.
+  /// Contiguous NV12 → OBS two-plane `video_queue_write` (Y + UV).
   fn write_nv12(&mut self, yuv: &[u8], timestamp: u64) {
+    let y_size = (self.cx as usize).saturating_mul(self.cy as usize);
+    let need = y_size + y_size / 2;
+    if yuv.len() < need || y_size == 0 {
+      return;
+    }
+    // SAFETY: C only reads data[0]/data[1] for the duration of the call.
+    let y_ptr = yuv.as_ptr() as *mut u8;
+    let uv_ptr = unsafe { yuv.as_ptr().add(y_size) as *mut u8 };
+    let mut data = [y_ptr, uv_ptr];
+    let mut linesize = [self.cx, self.cx];
     unsafe {
-      let base = self.view;
-      let write_idx = std::ptr::read_volatile(base as *const u32).wrapping_add(1);
-      let idx = (write_idx as usize) % 3;
-      let off = self.offsets[idx] as usize;
-      let ts_ptr = base.add(off) as *mut u64;
-      std::ptr::write_volatile(ts_ptr, timestamp);
-
-      let frame = base.add(off + FRAME_HEADER_SIZE as usize);
-      let n = (self.frame_size as usize).min(yuv.len());
-      // Contiguous NV12: Y plane then interleaved UV (same packing OBS uses after conversion).
-      if n > 0 {
-        std::ptr::copy_nonoverlapping(yuv.as_ptr(), frame, n);
-      }
-
-      // OBS order: update write/read then mark READY (volatile for cross-process readers).
-      std::ptr::write_volatile(base as *mut u32, write_idx);
-      std::ptr::write_volatile(base.add(4) as *mut u32, write_idx);
-      std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-      std::ptr::write_volatile(base.add(8) as *mut u32, SHARED_QUEUE_STATE_READY);
+      video_queue_write(
+        self.ptr,
+        data.as_mut_ptr(),
+        linesize.as_mut_ptr(),
+        timestamp,
+      );
     }
   }
 }
 
-impl Drop for ShmWriter {
+impl Drop for VideoQueueWriter {
   fn drop(&mut self) {
-    unsafe {
-      if !self.view.is_null() {
-        let header = self.view as *mut QueueHeader;
-        (*header).state = SHARED_QUEUE_STATE_STOPPING;
-        UnmapViewOfFile(self.view as *const _);
-      }
-      if !self.map.is_null() {
-        CloseHandle(self.map);
-      }
+    if !self.ptr.is_null() {
+      unsafe { video_queue_close(self.ptr) };
+      self.ptr = std::ptr::null_mut();
     }
   }
 }
@@ -518,8 +471,25 @@ fn ffmpeg_no_window(program: impl AsRef<std::ffi::OsStr>) -> Command {
   c
 }
 
-/// List DirectShow video capture devices (excludes FLYBOX virtual cam itself).
+/// List video capture devices (MF first, ffmpeg dshow fallback). Excludes FLYBOX.
 pub fn list_video_sources() -> Result<Vec<VcamSource>, String> {
+  #[cfg(windows)]
+  {
+    if let Ok(mf_names) = crate::vcam_mf::list_video_device_names() {
+      if !mf_names.is_empty() {
+        return Ok(
+          mf_names
+            .into_iter()
+            .map(|name| VcamSource { name })
+            .collect(),
+        );
+      }
+    }
+  }
+  list_video_sources_ffmpeg()
+}
+
+fn list_video_sources_ffmpeg() -> Result<Vec<VcamSource>, String> {
   let ffmpeg = ffmpeg_util::find_tool("ffmpeg.exe")
     .or_else(|| ffmpeg_util::find_tool("ffmpeg"))
     .ok_or_else(|| "找不到 ffmpeg.exe，无法列出摄像头".to_string())?;
@@ -646,7 +616,7 @@ fn preview_to_data_url(p: &PreviewRgba) -> Option<String> {
 }
 
 fn push_test_loop(
-  writer: &mut ShmWriter,
+  writer: &mut VideoQueueWriter,
   stop: &AtomicBool,
   frames: &AtomicU64,
   preview: &Mutex<Option<PreviewRgba>>,
@@ -678,7 +648,7 @@ fn spawn_push_thread(
     }
     thread::sleep(Duration::from_millis(50));
   }
-  let mut writer = ShmWriter::create(spec.w, spec.h, spec.interval)?;
+  let mut writer = VideoQueueWriter::create(spec.w, spec.h, spec.interval)?;
   {
     let frame = make_nv12_test(spec.w, spec.h, 0);
     writer.write_nv12(&frame, 0);
@@ -737,6 +707,7 @@ fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
     height: g.spec.h,
     fps: g.spec.fps,
     warn: g.warn.clone(),
+    capture_backend: g.capture_backend.clone(),
     message,
     source_note:
       "基于 OBS plugins/win-dshow 虚拟摄像头（GPL）。源码：src-vcam/；上架前公开本模块。"
@@ -746,29 +717,126 @@ fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
 }
 
 /// High-quality scale to target NV12 (lanczos + full chroma — closer to OBS quality).
+/// bt709 + limited (tv) range matches typical live encode / companion expectations.
 fn scale_vf_hq(spec: OutputSpec) -> String {
   format!(
     "scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp:\
      force_original_aspect_ratio=decrease,\
      pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,\
-     setsar=1,format=nv12",
+     setsar=1,\
+     format=nv12,\
+     colorspace=bt709:iall=bt709:fast=1",
     w = spec.w,
     h = spec.h
   )
 }
 
-/// OBS-like capture session: ffmpeg/dshow → packed NV12 frames.
-struct CameraCapture {
-  child: std::process::Child,
-  stdout: std::process::ChildStdout,
-  frame_size: usize,
-  first_frame: Vec<u8>,
+/// Capture session → packed NV12 frames (MF in-process preferred; ffmpeg fallback).
+enum CameraCapture {
+  #[cfg(windows)]
+  Mf {
+    cam: crate::vcam_mf::MfCamera,
+  },
+  Ffmpeg {
+    child: std::process::Child,
+    stdout: std::process::ChildStdout,
+    frame_size: usize,
+    first_frame: Vec<u8>,
+  },
+}
+
+impl CameraCapture {
+  fn frame_size(&self) -> usize {
+    match self {
+      #[cfg(windows)]
+      CameraCapture::Mf { cam } => cam.frame_size,
+      CameraCapture::Ffmpeg { frame_size, .. } => *frame_size,
+    }
+  }
+
+  fn take_first_frame(&mut self) -> Vec<u8> {
+    match self {
+      #[cfg(windows)]
+      CameraCapture::Mf { cam } => std::mem::take(&mut cam.first_frame),
+      CameraCapture::Ffmpeg { first_frame, .. } => std::mem::take(first_frame),
+    }
+  }
+
+  fn read_frame(&mut self, buf: &mut [u8]) -> Result<(), String> {
+    match self {
+      #[cfg(windows)]
+      CameraCapture::Mf { cam } => cam.read_nv12(buf),
+      CameraCapture::Ffmpeg { stdout, child, .. } => {
+        stdout.read_exact(buf).map_err(|e| {
+          let _ = child.kill();
+          let _ = child.wait();
+          format!("读摄像头帧失败: {e}")
+        })
+      }
+    }
+  }
+
+  fn backend(&self) -> &'static str {
+    match self {
+      #[cfg(windows)]
+      CameraCapture::Mf { .. } => "mf",
+      CameraCapture::Ffmpeg { .. } => "ffmpeg",
+    }
+  }
+
+  fn capture_size(&self) -> (u32, u32) {
+    match self {
+      #[cfg(windows)]
+      CameraCapture::Mf { cam } => (cam.cx, cam.cy),
+      CameraCapture::Ffmpeg { .. } => (0, 0), // filled by caller via OutputSpec
+    }
+  }
+}
+
+/// Nearest-neighbor scale packed NV12 → packed NV12 (L2 reconfigure fallback).
+fn scale_nv12_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+  let sw = sw.max(1) as usize;
+  let sh = sh.max(1) as usize;
+  let dw = dw.max(1) as usize;
+  let dh = dh.max(1) as usize;
+  let src_y = sw * sh;
+  let need_src = src_y + src_y / 2;
+  let mut out = vec![0u8; dw * dh + dw * dh / 2];
+  if src.len() < need_src {
+    return out;
+  }
+  for y in 0..dh {
+    let sy = y * sh / dh;
+    for x in 0..dw {
+      let sx = x * sw / dw;
+      out[y * dw + x] = src[sy * sw + sx];
+    }
+  }
+  let dst_y = dw * dh;
+  let src_uv = &src[src_y..];
+  let uv_dh = dh / 2;
+  let uv_sh = sh / 2;
+  for y in 0..uv_dh {
+    let sy = y * uv_sh / uv_dh.max(1);
+    for x in 0..dw {
+      // UV is interleaved; sample even x for U pair start.
+      let sx = (x * sw / dw) & !1;
+      let si = sy * sw + sx.min(sw - 1);
+      let di = y * dw + x;
+      if si < src_uv.len() && di < out.len() - dst_y {
+        out[dst_y + di] = src_uv[si];
+      }
+    }
+  }
+  out
 }
 
 impl Drop for CameraCapture {
   fn drop(&mut self) {
-    let _ = self.child.kill();
-    let _ = self.child.wait();
+    if let CameraCapture::Ffmpeg { child, .. } = self {
+      let _ = child.kill();
+      let _ = child.wait();
+    }
   }
 }
 
@@ -936,6 +1004,22 @@ fn read_exact_timeout(
 }
 
 fn open_camera_capture(device: &str, spec: OutputSpec) -> Result<CameraCapture, String> {
+  // D1: prefer in-process Media Foundation (no ffmpeg child).
+  #[cfg(windows)]
+  {
+    match crate::vcam_mf::MfCamera::open(device, spec.w, spec.h, spec.fps) {
+      Ok(cam) => {
+        return Ok(CameraCapture::Mf { cam });
+      }
+      Err(e) => {
+        eprintln!("[vcam] MF capture failed, fallback ffmpeg: {e}");
+      }
+    }
+  }
+  open_camera_capture_ffmpeg(device, spec)
+}
+
+fn open_camera_capture_ffmpeg(device: &str, spec: OutputSpec) -> Result<CameraCapture, String> {
   let ffmpeg = ffmpeg_util::find_tool("ffmpeg.exe")
     .or_else(|| ffmpeg_util::find_tool("ffmpeg"))
     .ok_or_else(|| "找不到 ffmpeg.exe，无法采集摄像头".to_string())?;
@@ -972,7 +1056,7 @@ fn open_camera_capture(device: &str, spec: OutputSpec) -> Result<CameraCapture, 
       device,
     ) {
       Ok(()) => {
-        return Ok(CameraCapture {
+        return Ok(CameraCapture::Ffmpeg {
           child,
           stdout,
           frame_size,
@@ -993,29 +1077,49 @@ fn open_camera_capture(device: &str, spec: OutputSpec) -> Result<CameraCapture, 
   })
 }
 
-/// Run one open capture until stop or pipe error. Returns Ok(true) if stopped cleanly.
+/// Run one open capture until stop or pipe error. Returns frame index.
+/// `out_spec` is SHM geometry; capture may be scaled to match (L2 reconfigure).
 fn pump_camera_to_shm(
   stop: &AtomicBool,
   frames: &AtomicU64,
   preview_tx: &std::sync::mpsc::SyncSender<Vec<u8>>,
-  writer: &mut ShmWriter,
+  writer: &mut VideoQueueWriter,
   mut cam: CameraCapture,
   frame_i0: u64,
-  interval: u64,
+  out_spec: OutputSpec,
+  cap_spec: OutputSpec,
 ) -> Result<u64, String> {
-  let frame_size = cam.frame_size;
-  // Double-buffer reads so we never block SHM publish on the next disk-less read prep.
-  let mut buf_a = std::mem::take(&mut cam.first_frame);
+  let need_scale = cap_spec.w != out_spec.w || cap_spec.h != out_spec.h;
+  let frame_size = cam.frame_size();
+  let mut buf_a = cam.take_first_frame();
+  if buf_a.len() != frame_size {
+    buf_a.resize(frame_size, 0);
+  }
   let mut buf_b = vec![0u8; frame_size];
   let mut use_a = true;
 
-  // Publish first frame immediately (already in buf_a).
+  let publish = |writer: &mut VideoQueueWriter,
+                 frames: &AtomicU64,
+                 preview_tx: &std::sync::mpsc::SyncSender<Vec<u8>>,
+                 raw: &[u8],
+                 frame_i: u64|
+   -> u64 {
+    let out = if need_scale {
+      scale_nv12_nearest(raw, cap_spec.w, cap_spec.h, out_spec.w, out_spec.h)
+    } else {
+      raw.to_vec()
+    };
+    let ts = frame_i.saturating_mul(out_spec.interval);
+    writer.write_nv12(&out, ts);
+    let n = frames.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 10 == 0 {
+      let _ = preview_tx.try_send(out);
+    }
+    frame_i + 1
+  };
+
   let mut frame_i = frame_i0;
-  let ts0 = frame_i.saturating_mul(interval);
-  writer.write_nv12(&buf_a, ts0);
-  frames.store(frame_i.saturating_add(1), Ordering::Relaxed);
-  let _ = preview_tx.try_send(buf_a.clone());
-  frame_i += 1;
+  frame_i = publish(writer, frames, preview_tx, &buf_a, frame_i);
 
   while !stop.load(Ordering::SeqCst) {
     let read_buf = if use_a {
@@ -1023,96 +1127,193 @@ fn pump_camera_to_shm(
     } else {
       buf_a.as_mut_slice()
     };
-    match cam.stdout.read_exact(read_buf) {
+    match cam.read_frame(read_buf) {
       Ok(()) => {
-        // Stable fps timestamps (100ns units) — matches OBS interval pacing.
-        let ts = frame_i.saturating_mul(interval);
-        writer.write_nv12(read_buf, ts);
-        let n = frames.fetch_add(1, Ordering::Relaxed) + 1;
-        // Non-blocking preview sample; never stall the capture hot path.
-        if n % 10 == 0 {
-          let _ = preview_tx.try_send(read_buf.to_vec());
-        }
-        frame_i += 1;
+        frame_i = publish(writer, frames, preview_tx, read_buf, frame_i);
         use_a = !use_a;
       }
-      Err(_) => {
-        let _ = cam.child.kill();
-        let _ = cam.child.wait();
-        return Ok(frame_i);
-      }
+      Err(_) => return Ok(frame_i),
     }
   }
-  let _ = cam.child.kill();
-  let _ = cam.child.wait();
   Ok(frame_i)
 }
 
+/// Result of opening capture on the worker thread (COM-safe for MF).
+struct OpenReady {
+  backend: String,
+  /// Spec used for SHM writer.
+  out_spec: OutputSpec,
+  warn: Option<String>,
+}
+
+fn wait_shm_free(max_ms: u64) -> bool {
+  let steps = (max_ms / 50).max(1);
+  for _ in 0..steps {
+    if !shm_is_open() {
+      return true;
+    }
+    thread::sleep(Duration::from_millis(50));
+  }
+  !shm_is_open()
+}
+
+fn open_camera_with_fallback(
+  device: &str,
+  requested: OutputSpec,
+) -> Result<(CameraCapture, OutputSpec, Option<String>), String> {
+  let mut attempts = vec![requested];
+  for fb in [
+    OutputSpec::resolve(Some(1920), Some(1080), Some(30)),
+    OutputSpec::resolve(Some(1280), Some(720), Some(30)),
+  ] {
+    if !attempts
+      .iter()
+      .any(|s| s.w == fb.w && s.h == fb.h && s.fps == fb.fps)
+    {
+      attempts.push(fb);
+    }
+  }
+  let mut last_err = String::new();
+  for (i, try_spec) in attempts.iter().enumerate() {
+    if i > 0 {
+      thread::sleep(Duration::from_millis(350));
+    } else {
+      thread::sleep(Duration::from_millis(150));
+    }
+    write_res_file(try_spec.w, try_spec.h, try_spec.interval);
+    match open_camera_capture(device, *try_spec) {
+      Ok(cam) => {
+        let warn = if i > 0 {
+          Some(format!(
+            "摄像头不支持 {}，已自动改用 {}。直播伴侣请选 {}×{} / {}fps / NV12。",
+            requested.label(),
+            try_spec.label(),
+            try_spec.w,
+            try_spec.h,
+            try_spec.fps
+          ))
+        } else {
+          None
+        };
+        return Ok((cam, *try_spec, warn));
+      }
+      Err(e) => last_err = e,
+    }
+  }
+  Err(if last_err.is_empty() {
+    format!("无法打开摄像头「{device}」")
+  } else {
+    format!(
+      "{last_err}（若提示设备占用：请点停止输出，关掉系统相机，再重试。1080p60 多数摄像头不支持，请改用 1080p30。）"
+    )
+  })
+}
+
+/// Capture worker: open camera **on this thread** (MF COM affinity), write SHM, reconnect.
 fn spawn_camera_thread(
   stop: Arc<AtomicBool>,
   frames: Arc<AtomicU64>,
   preview: Arc<Mutex<Option<PreviewRgba>>>,
   device: String,
-  first: CameraCapture,
-  spec: OutputSpec,
-) -> Result<thread::JoinHandle<()>, String> {
-  write_res_file(spec.w, spec.h, spec.interval);
-  for _ in 0..10 {
-    if !shm_is_open() {
-      break;
-    }
-    thread::sleep(Duration::from_millis(50));
-  }
-  let mut writer = ShmWriter::create(spec.w, spec.h, spec.interval)?;
-
-  // Preview worker: convert off the capture thread (OBS keeps output path lean).
-  let (preview_tx, preview_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
-  let preview_stop = stop.clone();
-  let preview_for_worker = preview.clone();
-  let pw = spec.w;
-  let ph = spec.h;
-  let _preview_worker = thread::spawn(move || {
-    while !preview_stop.load(Ordering::SeqCst) {
-      match preview_rx.recv_timeout(Duration::from_millis(200)) {
-        Ok(nv12) => {
-          let p = nv12_to_rgba_half(&nv12, pw, ph);
-          if let Ok(mut g) = preview_for_worker.lock() {
-            *g = Some(p);
-          }
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-      }
-    }
-  });
-
-  let handle = thread::spawn(move || {
+  requested: OutputSpec,
+  // If set, SHM is forced to this size (L2 scale path); capture still uses `requested`.
+  force_out_spec: Option<OutputSpec>,
+  ready_tx: std::sync::mpsc::Sender<Result<OpenReady, String>>,
+) -> thread::JoinHandle<()> {
+  thread::spawn(move || {
     bump_thread_priority();
+
+    let open = match open_camera_with_fallback(&device, requested) {
+      Ok(v) => v,
+      Err(e) => {
+        let _ = ready_tx.send(Err(e));
+        return;
+      }
+    };
+    let (first_cam, cap_spec, mut warn) = open;
+    let backend = first_cam.backend().to_string();
+    if backend == "ffmpeg" {
+      let msg = "已使用兼容采集模式（ffmpeg）。".to_string();
+      warn = Some(match warn {
+        Some(w) => format!("{w} {msg}"),
+        None => msg,
+      });
+    }
+
+    let out_spec = force_out_spec.unwrap_or(cap_spec);
+    write_res_file(out_spec.w, out_spec.h, out_spec.interval);
+    wait_shm_free(500);
+
+    let mut writer = match VideoQueueWriter::create(out_spec.w, out_spec.h, out_spec.interval) {
+      Ok(w) => w,
+      Err(e) => {
+        let _ = ready_tx.send(Err(e));
+        return;
+      }
+    };
+
+    if force_out_spec.is_some() && (cap_spec.w != out_spec.w || cap_spec.h != out_spec.h) {
+      let msg = format!(
+        "直播伴侣仍占用虚拟摄像头，已按 {} 缩放输出到 {}。若要原生分辨率，请在伴侣中取消/重选 FLYBOX 后再切一次。",
+        cap_spec.label(),
+        out_spec.label()
+      );
+      warn = Some(match warn {
+        Some(w) => format!("{w} {msg}"),
+        None => msg,
+      });
+    }
+
+    let _ = ready_tx.send(Ok(OpenReady {
+      backend: backend.clone(),
+      out_spec,
+      warn,
+    }));
+
+    let (preview_tx, preview_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+    let preview_stop = stop.clone();
+    let preview_for_worker = preview.clone();
+    let pw = out_spec.w;
+    let ph = out_spec.h;
+    let _preview_worker = thread::spawn(move || {
+      while !preview_stop.load(Ordering::SeqCst) {
+        match preview_rx.recv_timeout(Duration::from_millis(200)) {
+          Ok(nv12) => {
+            let p = nv12_to_rgba_half(&nv12, pw, ph);
+            if let Ok(mut g) = preview_for_worker.lock() {
+              *g = Some(p);
+            }
+          }
+          Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+          Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+      }
+    });
+
     let mut frame_i = 0u64;
-    // First session uses the already-opened capture (fail-fast in start_output).
-    let mut next = Some(first);
-    let mut reconnects = 0u32;
+    let mut next = Some(first_cam);
+    let active_cap = cap_spec;
 
     while !stop.load(Ordering::SeqCst) {
       let cam = match next.take() {
         Some(c) => c,
-        None => {
-          // Auto-reconnect after USB glitch / device busy blip (stability).
-          match open_camera_capture(&device, spec) {
-            Ok(c) => {
-              reconnects += 1;
-              c
+        None => match open_camera_capture(&device, active_cap) {
+          Ok(c) => c,
+          Err(_) => {
+            if stop.load(Ordering::SeqCst) {
+              break;
             }
-            Err(_) => {
-              if stop.load(Ordering::SeqCst) {
-                break;
-              }
-              thread::sleep(Duration::from_millis(400));
-              continue;
-            }
+            thread::sleep(Duration::from_millis(400));
+            continue;
           }
-        }
+        },
       };
+      // MF reports real size; ffmpeg uses active_cap.
+      let (cw, ch) = match cam.capture_size() {
+        (0, 0) => (active_cap.w, active_cap.h),
+        (w, h) => (w, h),
+      };
+      let this_cap = OutputSpec::resolve(Some(cw), Some(ch), Some(active_cap.fps));
 
       match pump_camera_to_shm(
         &stop,
@@ -1121,25 +1322,22 @@ fn spawn_camera_thread(
         &mut writer,
         cam,
         frame_i,
-        spec.interval,
+        out_spec,
+        this_cap,
       ) {
         Ok(fi) => {
           frame_i = fi;
           if stop.load(Ordering::SeqCst) {
             break;
           }
-          // Pipe ended unexpectedly — reconnect.
           thread::sleep(Duration::from_millis(200));
         }
-        Err(_) => {
-          thread::sleep(Duration::from_millis(300));
-        }
+        Err(_) => thread::sleep(Duration::from_millis(300)),
       }
     }
-    let _ = reconnects;
     drop(preview_tx);
-  });
-  Ok(handle)
+    drop(writer);
+  })
 }
 
 fn start_output(
@@ -1149,9 +1347,28 @@ fn start_output(
   height: Option<u32>,
   fps: Option<u32>,
 ) -> Result<(), String> {
+  start_output_ex(state, source, width, height, fps, None)
+}
+
+/// `force_out_spec`: L2 path — SHM geometry forced (scale capture into it).
+fn start_output_ex(
+  state: &VcamState,
+  source: Option<String>,
+  width: Option<u32>,
+  height: Option<u32>,
+  fps: Option<u32>,
+  force_out_spec: Option<OutputSpec>,
+) -> Result<(), String> {
   if !is_filter_registered() {
     return Err("请先安装/注册虚拟摄像头设备".into());
   }
+  {
+    let g = lock(state)?;
+    if g.running {
+      return Ok(());
+    }
+  }
+
   let source = source
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty() && s != "__test__");
@@ -1162,119 +1379,189 @@ fn start_output(
     }
   }
 
-  let mut spec = OutputSpec::resolve(width, height, fps);
-  let mut warn: Option<String> = None;
+  let requested = OutputSpec::resolve(width, height, fps);
+  write_res_file(requested.w, requested.h, requested.interval);
 
-  // Write res file *before* opening the camera so companion can re-read caps
-  // while we negotiate dshow (OBS writes obs-virtualcam.txt at output start).
-  write_res_file(spec.w, spec.h, spec.interval);
-
-  // Open camera with automatic output-spec fallback (many USB cams cannot do 1080p60).
-  let (first_cam, final_spec) = if let Some(ref name) = source {
-    let mut attempts = vec![spec];
-    // Prefer full HD 30, then 720p30 if requested mode fails.
-    for fb in [
-      OutputSpec::resolve(Some(1920), Some(1080), Some(30)),
-      OutputSpec::resolve(Some(1280), Some(720), Some(30)),
-    ] {
-      if !attempts.iter().any(|s| s.w == fb.w && s.h == fb.h && s.fps == fb.fps) {
-        attempts.push(fb);
-      }
-    }
-
-    let mut opened: Option<(CameraCapture, OutputSpec)> = None;
-    let mut last_err = String::new();
-    for (i, try_spec) in attempts.iter().enumerate() {
-      // Small settle delay so WebView getUserMedia fully releases the pin.
-      if i > 0 {
-        thread::sleep(Duration::from_millis(350));
-      } else {
-        thread::sleep(Duration::from_millis(200));
-      }
-      write_res_file(try_spec.w, try_spec.h, try_spec.interval);
-      match open_camera_capture(name, *try_spec) {
-        Ok(cam) => {
-          if i > 0 {
-            warn = Some(format!(
-              "摄像头不支持 {}，已自动改用 {}。直播伴侣请选 {}×{} / {}fps / NV12。",
-              spec.label(),
-              try_spec.label(),
-              try_spec.w,
-              try_spec.h,
-              try_spec.fps
-            ));
-          }
-          opened = Some((cam, *try_spec));
-          break;
-        }
-        Err(e) => last_err = e,
-      }
-    }
-    match opened {
-      Some((cam, s)) => (Some(cam), s),
-      None => {
-        return Err(format!(
-          "{last_err}（若提示设备占用：请点停止输出，关掉系统相机，再重试。1080p60 多数摄像头不支持，请改用 1080p30。）"
-        ));
-      }
-    }
-  } else {
-    (None, spec)
-  };
-  spec = final_spec;
-  write_res_file(spec.w, spec.h, spec.interval);
-
-  let mut g = lock(state)?;
-  if g.running {
-    drop(first_cam);
-    return Ok(());
-  }
   let stop = Arc::new(AtomicBool::new(false));
   let frames = Arc::new(AtomicU64::new(0));
   let preview = Arc::new(Mutex::new(None));
 
-  let join = if let (Some(name), Some(cam)) = (source.clone(), first_cam) {
-    spawn_camera_thread(
+  if let Some(name) = source.clone() {
+    // Camera open happens **on the capture thread** (MF COM affinity).
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let join = spawn_camera_thread(
       stop.clone(),
       frames.clone(),
       preview.clone(),
       name,
-      cam,
-      spec,
-    )?
+      requested,
+      force_out_spec,
+      ready_tx,
+    );
+    let ready = match ready_rx.recv_timeout(Duration::from_secs(15)) {
+      Ok(r) => r,
+      Err(_) => {
+        stop.store(true, Ordering::SeqCst);
+        let _ = join.join();
+        return Err("打开摄像头超时，请重试".into());
+      }
+    };
+    match ready {
+      Ok(info) => {
+        let mut g = lock(state)?;
+        if g.running {
+          stop.store(true, Ordering::SeqCst);
+          drop(g);
+          let _ = join.join();
+          return Ok(());
+        }
+        g.stop = Some(stop);
+        g.join = Some(join);
+        g.frames = frames;
+        g.preview = preview;
+        g.source = source;
+        g.spec = info.out_spec;
+        g.warn = info.warn;
+        g.capture_backend = Some(info.backend);
+        g.running = true;
+        Ok(())
+      }
+      Err(e) => {
+        stop.store(true, Ordering::SeqCst);
+        let _ = join.join();
+        Err(e)
+      }
+    }
   } else {
-    spawn_push_thread(stop.clone(), frames.clone(), preview.clone(), spec)?
-  };
+    // Test pattern — no COM/camera.
+    let spec = force_out_spec.unwrap_or(requested);
+    write_res_file(spec.w, spec.h, spec.interval);
+    wait_shm_free(500);
+    let join = spawn_push_thread(stop.clone(), frames.clone(), preview.clone(), spec)?;
+    let mut g = lock(state)?;
+    g.stop = Some(stop);
+    g.join = Some(join);
+    g.frames = frames;
+    g.preview = preview;
+    g.source = None;
+    g.spec = spec;
+    g.warn = None;
+    g.capture_backend = Some("test".into());
+    g.running = true;
+    Ok(())
+  }
+}
 
-  g.stop = Some(stop);
-  g.join = Some(join);
-  g.frames = frames;
-  g.preview = preview;
-  g.source = source;
-  g.spec = spec;
-  g.warn = warn;
-  g.running = true;
+fn stop_worker(state: &VcamState) -> Result<(), String> {
+  let (stop_flag, join) = {
+    let mut g = lock(state)?;
+    (g.stop.take(), g.join.take())
+  };
+  if let Some(s) = stop_flag {
+    s.store(true, Ordering::SeqCst);
+  }
+  if let Some(j) = join {
+    let _ = j.join();
+  }
   Ok(())
 }
 
 fn stop_output(state: &VcamState) -> Result<(), String> {
+  stop_worker(state)?;
   let mut g = lock(state)?;
-  if let Some(s) = g.stop.take() {
-    s.store(true, Ordering::SeqCst);
-  }
-  if let Some(j) = g.join.take() {
-    let _ = j.join();
-  }
   g.running = false;
   g.source = None;
   g.spec = DEFAULT_SPEC;
   g.warn = None;
+  g.capture_backend = None;
   g.frames = Arc::new(AtomicU64::new(0));
   if let Ok(mut p) = g.preview.lock() {
     *p = None;
   }
   g.preview = Arc::new(Mutex::new(None));
   Ok(())
+}
+
+/// Hot-switch resolution/fps. L1: recreate SHM. L2: keep old SHM size + scale if companion holds mapping.
+fn reconfigure_output(
+  state: &VcamState,
+  width: Option<u32>,
+  height: Option<u32>,
+  fps: Option<u32>,
+) -> Result<(), String> {
+  let (source, old_spec) = {
+    let g = lock(state)?;
+    if !g.running {
+      return Err("请先开始输出，再切换分辨率".into());
+    }
+    (g.source.clone(), g.spec)
+  };
+  let new_spec = OutputSpec::resolve(width, height, fps);
+  if new_spec.w == old_spec.w && new_spec.h == old_spec.h && new_spec.fps == old_spec.fps {
+    return Ok(());
+  }
+
+  // Tear down writer (STOPPING) but remember we are reconfiguring.
+  stop_worker(state)?;
+  {
+    let mut g = lock(state)?;
+    g.running = false;
+    g.stop = None;
+    g.join = None;
+    g.capture_backend = None;
+  }
+
+  // L1: wait longer for companion/filter to release the mapping.
+  let free = wait_shm_free(3000);
+  if free {
+    match start_output_ex(
+      state,
+      source.clone(),
+      Some(new_spec.w),
+      Some(new_spec.h),
+      Some(new_spec.fps),
+      None,
+    ) {
+      Ok(()) => return Ok(()),
+      Err(e) => {
+        // Fall through to L2 / restore.
+        eprintln!("[vcam] reconfigure L1 failed: {e}");
+      }
+    }
+  }
+
+  // L2: force SHM to old size, capture at new request, scale into SHM (stay live).
+  match start_output_ex(
+    state,
+    source.clone(),
+    Some(new_spec.w),
+    Some(new_spec.h),
+    Some(new_spec.fps),
+    Some(old_spec),
+  ) {
+    Ok(()) => {
+      let mut g = lock(state)?;
+      let extra = "直播伴侣仍占用虚拟摄像头，已用缩放维持输出。若要原生分辨率，请在伴侣中重选/取消 FLYBOX 后再切一次。";
+      g.warn = Some(match g.warn.take() {
+        Some(w) if w.contains("缩放") => w,
+        Some(w) => format!("{w} {extra}"),
+        None => extra.into(),
+      });
+      Ok(())
+    }
+    Err(e2) => {
+      // Last resort: restore old preset exactly.
+      let _ = start_output_ex(
+        state,
+        source,
+        Some(old_spec.w),
+        Some(old_spec.h),
+        Some(old_spec.fps),
+        None,
+      );
+      Err(format!("切换分辨率失败：{e2}"))
+    }
+  }
 }
 
 #[tauri::command]
@@ -1365,6 +1652,17 @@ pub fn vcam_stop(state: tauri::State<'_, VcamState>) -> Result<(), String> {
   stop_output(&state)
 }
 
+/// Change output resolution/fps while already running (companion may need reselect).
+#[tauri::command]
+pub fn vcam_reconfigure(
+  state: tauri::State<'_, VcamState>,
+  width: Option<u32>,
+  height: Option<u32>,
+  fps: Option<u32>,
+) -> Result<(), String> {
+  reconfigure_output(&state, width, height, fps)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1403,6 +1701,10 @@ mod tests {
       assert!(err.contains("安装") || err.contains("注册"), "{err}");
       return;
     }
+    if shm_is_open() {
+      eprintln!("skip start_stop: SHM already held by another process");
+      return;
+    }
 
     start_output(&state, None, Some(1280), Some(720), Some(30))
       .expect("start_output test pattern");
@@ -1435,5 +1737,49 @@ mod tests {
         s.name
       );
     }
+  }
+
+  #[test]
+  fn video_queue_ffi_create_write_close() {
+    // If another session holds the mapping, skip rather than fail the suite.
+    if shm_is_open() {
+      return;
+    }
+    let mut w = VideoQueueWriter::create(64, 48, 333_333).expect("create queue");
+    let frame = make_nv12_test(64, 48, 0);
+    w.write_nv12(&frame, 0);
+    assert!(shm_is_open(), "mapping should exist while writer lives");
+    drop(w);
+    // Do not assert mapping gone: parallel tests / running tauri dev share SHM name.
+  }
+
+  #[test]
+  fn reconfigure_requires_running() {
+    let state = VcamState::default();
+    let err = reconfigure_output(&state, Some(1280), Some(720), Some(30))
+      .expect_err("must fail when idle");
+    assert!(err.contains("开始输出") || err.contains("切换"), "{err}");
+  }
+
+  #[test]
+  fn reconfigure_test_pattern_when_registered() {
+    let state = VcamState::default();
+    if !is_filter_registered() {
+      return;
+    }
+    if shm_is_open() {
+      eprintln!("skip reconfigure: SHM already held by another process");
+      return;
+    }
+    start_output(&state, None, Some(1280), Some(720), Some(30)).expect("start 720");
+    thread::sleep(Duration::from_millis(150));
+    reconfigure_output(&state, Some(1920), Some(1080), Some(30)).expect("to 1080");
+    thread::sleep(Duration::from_millis(200));
+    let s = collect_status(&state).expect("status");
+    assert!(s.running);
+    assert_eq!(s.width, 1920);
+    assert_eq!(s.height, 1080);
+    assert!(s.frames > 0 || s.pushing);
+    stop_output(&state).expect("stop");
   }
 }
