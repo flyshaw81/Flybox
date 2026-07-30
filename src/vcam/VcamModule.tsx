@@ -16,11 +16,22 @@ type VcamStatus = {
   pushing?: boolean;
   frames?: number;
   source?: string | null;
+  width?: number;
+  height?: number;
+  fps?: number;
   warn?: string | null;
   message: string;
   sourceNote: string;
   dllPath?: string | null;
 };
+
+/** Output presets for companion (default 1080p30). */
+const RES_PRESETS = [
+  { id: "1080p30", label: "1920×1080 · 30fps", w: 1920, h: 1080, fps: 30 },
+  { id: "1080p60", label: "1920×1080 · 60fps", w: 1920, h: 1080, fps: 60 },
+  { id: "720p30", label: "1280×720 · 30fps", w: 1280, h: 720, fps: 30 },
+  { id: "720p60", label: "1280×720 · 60fps", w: 1280, h: 720, fps: 60 },
+] as const;
 
 type VcamSource = { name: string };
 
@@ -75,6 +86,13 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
   const [status, setStatus] = useState<VcamStatus | null>(null);
   const [sources, setSources] = useState<VcamSource[]>([]);
   const [selected, setSelected] = useState<string>(TEST_VALUE);
+  const [resId, setResId] = useState<string>(() => {
+    try {
+      return localStorage.getItem("flybox.vcam.res") || "1080p30";
+    } catch {
+      return "1080p30";
+    }
+  });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [previewHint, setPreviewHint] = useState<string | null>(null);
@@ -193,10 +211,15 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
     setPreviewKind("canvas");
     clearCanvas();
     setPreviewHint(t("vcamPreviewConnecting"));
+    const preset =
+      RES_PRESETS.find((p) => p.id === resId) ?? RES_PRESETS[0];
     // Let Windows release the device pin before ffmpeg opens it.
     await new Promise((r) => window.setTimeout(r, 600));
     await invoke("vcam_start", {
       source: sourceName === TEST_VALUE ? null : sourceName,
+      width: preset.w,
+      height: preset.h,
+      fps: preset.fps,
     });
   }
 
@@ -493,6 +516,32 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
           </button>
         </div>
         <p className="muted vcam-note">{t("vcamSourceHint")}</p>
+        <div className="vcam-card-label" style={{ marginTop: 12 }}>
+          {t("vcamResTitle")}
+        </div>
+        <div className="vcam-source-row">
+          <select
+            className="vcam-source-select"
+            value={resId}
+            disabled={busy || running}
+            onChange={(e) => {
+              const v = e.target.value;
+              setResId(v);
+              try {
+                localStorage.setItem("flybox.vcam.res", v);
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            {RES_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="muted vcam-note">{t("vcamResHint")}</p>
       </section>
 
       <section className="vcam-card">
@@ -532,6 +581,14 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
               <strong>
                 {status.running
                   ? status.source || t("vcamSourceTest")
+                  : "—"}
+              </strong>
+            </li>
+            <li>
+              <span className="muted">{t("vcamResActive")}</span>
+              <strong>
+                {status.running && status.width && status.height
+                  ? `${status.width}×${status.height} @ ${status.fps ?? 30}fps`
                   : "—"}
               </strong>
             </li>

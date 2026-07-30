@@ -40,6 +40,9 @@ FLYBOX UI（顶栏 → 虚拟摄像头）
 - [x] 设备名 **FLYBOX Camera**、独立 GUID、共享内存 `FLYBOXVirtualCamVideo`
 - [x] Rust：管理员 regsvr32 安装 + 测试彩条送帧
 - [x] **P2 可用路径**：安装 → 开始输出 → 系统可选 FLYBOX Camera（测试彩条）
+- [x] 真机原生采集（ffmpeg/dshow）+ 满帧率 SHM；预览读虚拟设备
+- [x] 输出预设：1080p30/60、720p30/60；过滤器预宣告多分辨率
+- [x] 画质：lanczos/full-chroma；MJPEG/原生阶梯；采集线程高优先级；断线重连
 - [ ] P3 抖音直播伴侣完整验收（需本机伴侣 + 人工点选）
 - [ ] P4 安装包捆绑 DLL
 - [ ] P5 上架前公开 GPL 仓

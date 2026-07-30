@@ -40,11 +40,17 @@ VCamFilter::VCamFilter() : OutputFilter()
 	in_obs = !!wcsstr(file, obs_process);
 
 	/* ---------------------------------------- */
-	/* add last/current obs res/interval        */
+	/* Resolve output size: live SHM → res file → 1080p30 default.
+	   Also pre-advertise common formats so companion can list 1080p/720p
+	   without restarting (OBS only exposes the active format; we expose presets). */
 
-	uint32_t new_obs_cx = obs_cx;
-	uint32_t new_obs_cy = obs_cy;
-	uint64_t new_obs_interval = obs_interval;
+	const uint32_t def_cx = 1920;
+	const uint32_t def_cy = 1080;
+	const uint64_t def_interval = 333333ULL; /* 30 fps in 100ns units */
+
+	uint32_t new_obs_cx = 0;
+	uint32_t new_obs_cy = 0;
+	uint64_t new_obs_interval = 0;
 
 	vq = video_queue_open();
 	if (vq) {
@@ -55,41 +61,60 @@ VCamFilter::VCamFilter() : OutputFilter()
 		/* don't keep it open until the filter actually starts */
 		video_queue_close(vq);
 		vq = nullptr;
-	} else {
+	}
+	if (!new_obs_cx || !new_obs_cy || !new_obs_interval) {
 		wchar_t res_file[MAX_PATH];
 		SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, res_file);
 		StringCbCat(res_file, sizeof(res_file), L"\\flybox-virtualcam.txt");
 
-		HANDLE file = CreateFileW(res_file, GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+		HANDLE file = CreateFileW(res_file, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
 		if (file != INVALID_HANDLE_VALUE) {
 			char res[128];
 			DWORD len = 0;
 
 			if (ReadFile(file, res, sizeof(res) - 1, &len, nullptr)) {
 				res[len] = 0;
-				int vals = sscanf(res, "%" PRIu32 "x%" PRIu32 "x%" PRIu64, &new_obs_cx, &new_obs_cy,
-						  &new_obs_interval);
-				if (vals != 3) {
-					new_obs_cx = obs_cx;
-					new_obs_cy = obs_cy;
-					new_obs_interval = obs_interval;
+				uint32_t cx = 0, cy = 0;
+				uint64_t interval = 0;
+				int vals = sscanf(res, "%" PRIu32 "x%" PRIu32 "x%" PRIu64, &cx, &cy, &interval);
+				if (vals == 3 && cx && cy && interval) {
+					new_obs_cx = cx;
+					new_obs_cy = cy;
+					new_obs_interval = interval;
 				}
 			}
 
 			CloseHandle(file);
 		}
 	}
-
-	if (new_obs_cx != obs_cx || new_obs_cy != obs_cy || new_obs_interval != obs_interval) {
-		AddVideoFormat(VideoFormat::NV12, new_obs_cx, new_obs_cy, new_obs_interval);
-		AddVideoFormat(VideoFormat::I420, new_obs_cx, new_obs_cy, new_obs_interval);
-		AddVideoFormat(VideoFormat::YUY2, new_obs_cx, new_obs_cy, new_obs_interval);
-		SetVideoFormat(VideoFormat::NV12, new_obs_cx, new_obs_cy, new_obs_interval);
-
-		obs_cx = new_obs_cx;
-		obs_cy = new_obs_cy;
-		obs_interval = new_obs_interval;
+	if (!new_obs_cx || !new_obs_cy || !new_obs_interval) {
+		new_obs_cx = def_cx;
+		new_obs_cy = def_cy;
+		new_obs_interval = def_interval;
 	}
+
+	/* Common live presets (NV12 primary; I420/YUY2 for picky hosts). */
+	struct {
+		uint32_t cx, cy;
+		uint64_t interval;
+	} presets[] = {
+		{1920, 1080, 333333ULL}, /* 1080p30 */
+		{1920, 1080, 166666ULL}, /* 1080p60 */
+		{1280, 720, 333333ULL},  /* 720p30 */
+		{1280, 720, 166666ULL},  /* 720p60 */
+		{new_obs_cx, new_obs_cy, new_obs_interval},
+	};
+
+	for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); i++) {
+		AddVideoFormat(VideoFormat::NV12, presets[i].cx, presets[i].cy, presets[i].interval);
+		AddVideoFormat(VideoFormat::I420, presets[i].cx, presets[i].cy, presets[i].interval);
+		AddVideoFormat(VideoFormat::YUY2, presets[i].cx, presets[i].cy, presets[i].interval);
+	}
+	SetVideoFormat(VideoFormat::NV12, new_obs_cx, new_obs_cy, new_obs_interval);
+
+	obs_cx = new_obs_cx;
+	obs_cy = new_obs_cy;
+	obs_interval = new_obs_interval;
 
 	/* ---------------------------------------- */
 
