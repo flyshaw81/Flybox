@@ -375,9 +375,8 @@ fn spawn_push_thread(stop: Arc<AtomicBool>) -> Result<thread::JoinHandle<()>, St
   Ok(handle)
 }
 
-#[tauri::command]
-pub fn vcam_status(state: tauri::State<'_, VcamState>) -> Result<VcamStatus, String> {
-  let g = lock(&state)?;
+fn collect_status(state: &VcamState) -> Result<VcamStatus, String> {
+  let g = lock(state)?;
   let dll = resolve_dll();
   let installed = is_filter_registered();
   let message = if g.running {
@@ -401,6 +400,53 @@ pub fn vcam_status(state: tauri::State<'_, VcamState>) -> Result<VcamStatus, Str
   })
 }
 
+fn start_output(state: &VcamState) -> Result<(), String> {
+  if !is_filter_registered() {
+    return Err("请先安装/注册虚拟摄像头设备".into());
+  }
+  let mut g = lock(state)?;
+  if g.running {
+    return Ok(());
+  }
+  let stop = Arc::new(AtomicBool::new(false));
+  let join = spawn_push_thread(stop.clone())?;
+  g.stop = Some(stop);
+  g.join = Some(join);
+  g.running = true;
+  Ok(())
+}
+
+fn stop_output(state: &VcamState) -> Result<(), String> {
+  let mut g = lock(state)?;
+  if let Some(s) = g.stop.take() {
+    s.store(true, Ordering::SeqCst);
+  }
+  if let Some(j) = g.join.take() {
+    let _ = j.join();
+  }
+  g.running = false;
+  Ok(())
+}
+
+#[cfg(test)]
+fn shm_mapping_open() -> bool {
+  let wide: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+  unsafe {
+    let h = OpenFileMappingW(FILE_MAP_ALL_ACCESS, 0, wide.as_ptr());
+    if h.is_null() {
+      false
+    } else {
+      CloseHandle(h);
+      true
+    }
+  }
+}
+
+#[tauri::command]
+pub fn vcam_status(state: tauri::State<'_, VcamState>) -> Result<VcamStatus, String> {
+  collect_status(&state)
+}
+
 #[tauri::command]
 pub fn vcam_install(_state: tauri::State<'_, VcamState>) -> Result<(), String> {
   let dll = resolve_dll().ok_or_else(|| {
@@ -419,18 +465,7 @@ pub fn vcam_install(_state: tauri::State<'_, VcamState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn vcam_uninstall(state: tauri::State<'_, VcamState>) -> Result<(), String> {
-  {
-    let mut g = lock(&state)?;
-    if g.running {
-      if let Some(s) = g.stop.take() {
-        s.store(true, Ordering::SeqCst);
-      }
-      if let Some(j) = g.join.take() {
-        let _ = j.join();
-      }
-      g.running = false;
-    }
-  }
+  stop_output(&state)?;
   let dll = resolve_dll().ok_or_else(|| "找不到 DLL，无法注销。".to_string())?;
   elevate_regsvr32(&dll, true)?;
   Ok(())
@@ -438,30 +473,71 @@ pub fn vcam_uninstall(state: tauri::State<'_, VcamState>) -> Result<(), String> 
 
 #[tauri::command]
 pub fn vcam_start(state: tauri::State<'_, VcamState>) -> Result<(), String> {
-  if !is_filter_registered() {
-    return Err("请先安装/注册虚拟摄像头设备".into());
-  }
-  let mut g = lock(&state)?;
-  if g.running {
-    return Ok(());
-  }
-  let stop = Arc::new(AtomicBool::new(false));
-  let join = spawn_push_thread(stop.clone())?;
-  g.stop = Some(stop);
-  g.join = Some(join);
-  g.running = true;
-  Ok(())
+  start_output(&state)
 }
 
 #[tauri::command]
 pub fn vcam_stop(state: tauri::State<'_, VcamState>) -> Result<(), String> {
-  let mut g = lock(&state)?;
-  if let Some(s) = g.stop.take() {
-    s.store(true, Ordering::SeqCst);
+  stop_output(&state)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn dll_resolves_from_src_vcam_dist() {
+    let p = resolve_dll().expect("DLL should exist under src-vcam/dist or build");
+    assert!(p.is_file(), "missing {:?}", p);
+    assert!(
+      p.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .contains("flybox-virtualcam-module64"),
+      "unexpected dll name {:?}",
+      p
+    );
   }
-  if let Some(j) = g.join.take() {
-    let _ = j.join();
+
+  #[test]
+  fn status_device_name_is_flybox_camera() {
+    let state = VcamState::default();
+    let s = collect_status(&state).expect("status");
+    assert_eq!(s.device_name, "FLYBOX Camera");
+    assert_eq!(s.device_name, DEVICE_NAME);
+    assert!(!s.running);
+    assert!(s.dll_path.is_some(), "dll_path should resolve for status");
   }
-  g.running = false;
-  Ok(())
+
+  #[test]
+  fn start_stop_push_when_registered() {
+    let state = VcamState::default();
+    if !is_filter_registered() {
+      // Still prove unregistered path refuses start.
+      let err = start_output(&state).expect_err("start must fail when unregistered");
+      assert!(err.contains("安装") || err.contains("注册"), "{err}");
+      return;
+    }
+
+    start_output(&state).expect("start_output");
+    let mid = collect_status(&state).expect("status while running");
+    assert!(mid.running, "running should be true after start");
+    assert_eq!(mid.device_name, "FLYBOX Camera");
+    // Give writer a moment to create SHM and first frames.
+    thread::sleep(Duration::from_millis(120));
+    assert!(
+      shm_mapping_open(),
+      "SHM {SHM_NAME} should exist while pushing"
+    );
+
+    stop_output(&state).expect("stop_output");
+    let after = collect_status(&state).expect("status after stop");
+    assert!(!after.running, "running should be false after stop");
+    // Mapping should release shortly after stop (Drop closes handle).
+    thread::sleep(Duration::from_millis(80));
+    assert!(
+      !shm_mapping_open(),
+      "SHM should be gone after stop"
+    );
+  }
 }
