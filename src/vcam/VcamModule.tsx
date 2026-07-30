@@ -88,7 +88,9 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
   const [selected, setSelected] = useState<string>(TEST_VALUE);
   const [resId, setResId] = useState<string>(() => {
     try {
-      return localStorage.getItem("flybox.vcam.res") || "1080p30";
+      // Prefer 1080p30: many webcams (C930c) cannot open 1080p60 natively.
+      const saved = localStorage.getItem("flybox.vcam.res") || "1080p30";
+      return saved === "1080p60" ? "1080p30" : saved;
     } catch {
       return "1080p30";
     }
@@ -213,8 +215,9 @@ export default function VcamModule({ embedded, onChromeChange }: Props) {
     setPreviewHint(t("vcamPreviewConnecting"));
     const preset =
       RES_PRESETS.find((p) => p.id === resId) ?? RES_PRESETS[0];
-    // Let Windows release the device pin before ffmpeg opens it.
-    await new Promise((r) => window.setTimeout(r, 600));
+    // Fully drop WebView camera pins (idle preview holds the device exclusively).
+    releaseCamera();
+    await new Promise((r) => window.setTimeout(r, 800));
     await invoke("vcam_start", {
       source: sourceName === TEST_VALUE ? null : sourceName,
       width: preset.w,

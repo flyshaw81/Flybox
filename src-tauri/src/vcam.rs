@@ -810,14 +810,16 @@ fn spawn_ffmpeg_raw(
     .arg("-f")
     .arg("dshow")
     .arg("-rtbufsize")
-    .arg("300M")
-    .arg("-framerate")
-    .arg(&fps_s);
+    .arg("300M");
 
-  // Mode ladder: prefer native size@fps, then MJPEG, then any+HQ scale.
+  // Mode ladder (C930c-class cams often cannot do 1080p60 natively):
+  // 0 exact size@fps, 1 mjpeg size@fps, 2 any input + HQ scale + output fps,
+  // 3 any input @30 + scale + output fps (best for 1080p60 from 30fps sensors).
   match mode {
     0 => {
       cmd
+        .arg("-framerate")
+        .arg(&fps_s)
         .arg("-video_size")
         .arg(&size_s)
         .arg("-i")
@@ -833,8 +835,9 @@ fn spawn_ffmpeg_raw(
         .arg(&fps_s);
     }
     1 => {
-      // Many webcams stream MJPEG natively — higher quality over USB than YUY2.
       cmd
+        .arg("-framerate")
+        .arg(&fps_s)
         .arg("-video_size")
         .arg(&size_s)
         .arg("-vcodec")
@@ -847,8 +850,22 @@ fn spawn_ffmpeg_raw(
         .arg("-r")
         .arg(&fps_s);
     }
-    _ => {
+    2 => {
+      // Do not force input size/fps — let dshow pick a working mode.
       cmd
+        .arg("-i")
+        .arg(&input)
+        .arg("-an")
+        .arg("-vf")
+        .arg(scale_vf_hq(spec))
+        .arg("-r")
+        .arg(&fps_s);
+    }
+    _ => {
+      // Prefer a reliable 30fps input graph, then raise/lower output fps.
+      cmd
+        .arg("-framerate")
+        .arg("30")
         .arg("-i")
         .arg(&input)
         .arg("-an")
@@ -927,7 +944,7 @@ fn open_camera_capture(device: &str, spec: OutputSpec) -> Result<CameraCapture, 
   let mut last_err = String::new();
 
   // Try capture modes best→fallback (OBS also negotiates formats, not a single fixed path).
-  for mode in [0u8, 1u8, 2u8] {
+  for mode in [0u8, 1u8, 2u8, 3u8] {
     let mut child = match spawn_ffmpeg_raw(&ffmpeg, device, spec, mode) {
       Ok(c) => c,
       Err(e) => {
@@ -1145,18 +1162,67 @@ fn start_output(
     }
   }
 
-  let spec = OutputSpec::resolve(width, height, fps);
+  let mut spec = OutputSpec::resolve(width, height, fps);
+  let mut warn: Option<String> = None;
 
   // Write res file *before* opening the camera so companion can re-read caps
   // while we negotiate dshow (OBS writes obs-virtualcam.txt at output start).
   write_res_file(spec.w, spec.h, spec.interval);
 
-  // Fail-fast open (same device negotiation as OBS format selection).
-  let first_cam = if let Some(ref name) = source {
-    Some(open_camera_capture(name, spec)?)
+  // Open camera with automatic output-spec fallback (many USB cams cannot do 1080p60).
+  let (first_cam, final_spec) = if let Some(ref name) = source {
+    let mut attempts = vec![spec];
+    // Prefer full HD 30, then 720p30 if requested mode fails.
+    for fb in [
+      OutputSpec::resolve(Some(1920), Some(1080), Some(30)),
+      OutputSpec::resolve(Some(1280), Some(720), Some(30)),
+    ] {
+      if !attempts.iter().any(|s| s.w == fb.w && s.h == fb.h && s.fps == fb.fps) {
+        attempts.push(fb);
+      }
+    }
+
+    let mut opened: Option<(CameraCapture, OutputSpec)> = None;
+    let mut last_err = String::new();
+    for (i, try_spec) in attempts.iter().enumerate() {
+      // Small settle delay so WebView getUserMedia fully releases the pin.
+      if i > 0 {
+        thread::sleep(Duration::from_millis(350));
+      } else {
+        thread::sleep(Duration::from_millis(200));
+      }
+      write_res_file(try_spec.w, try_spec.h, try_spec.interval);
+      match open_camera_capture(name, *try_spec) {
+        Ok(cam) => {
+          if i > 0 {
+            warn = Some(format!(
+              "摄像头不支持 {}，已自动改用 {}。直播伴侣请选 {}×{} / {}fps / NV12。",
+              spec.label(),
+              try_spec.label(),
+              try_spec.w,
+              try_spec.h,
+              try_spec.fps
+            ));
+          }
+          opened = Some((cam, *try_spec));
+          break;
+        }
+        Err(e) => last_err = e,
+      }
+    }
+    match opened {
+      Some((cam, s)) => (Some(cam), s),
+      None => {
+        return Err(format!(
+          "{last_err}（若提示设备占用：请点停止输出，关掉系统相机，再重试。1080p60 多数摄像头不支持，请改用 1080p30。）"
+        ));
+      }
+    }
   } else {
-    None
+    (None, spec)
   };
+  spec = final_spec;
+  write_res_file(spec.w, spec.h, spec.interval);
 
   let mut g = lock(state)?;
   if g.running {
@@ -1186,7 +1252,7 @@ fn start_output(
   g.preview = preview;
   g.source = source;
   g.spec = spec;
-  g.warn = None;
+  g.warn = warn;
   g.running = true;
   Ok(())
 }
